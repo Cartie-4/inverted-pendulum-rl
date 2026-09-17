@@ -418,9 +418,95 @@ python scripts/evaluate.py --help
   这类数字会**明显虚高**。想看真实能力就用默认口径，或显式 `--max-seconds 10`。
 * **`--terminate-angle` 与 `--init-angle-limit` 都以"度"为单位**（内部转弧度）。
 * **起摆/大角度阶段必须关掉角度终止**（`--terminate-angle 0`），否则开局即结束——见第 3.1 节。
-* 依赖为 CPU 版本即可训练；有 GPU 会自动使用（`--device auto`）。
 * `pip install pytorch-lightning` 只提供 `pytorch_lightning` 包名，不包含统一的 `lightning`
   命名空间包，所以代码统一 `import pytorch_lightning`。
 * 经典能量起摆控制器在**转轴模型**上稳定成功（`test_sanity.py` 硬性断言）；
   在**小车模型**上只能把杆子抽到约 80–120% 临界能量——因为小车模型里推力要先克服等效惯量，
   且导轨长度有限，能量律的加速度假设会被饱和破坏。
+
+---
+
+## 12. GPU / CUDA
+
+**代码层面完全设备无关**，没有任何地方把 device 写死：
+
+| 位置 | 行为 |
+|---|---|
+| `PPOAgent(device=...)` | `resolve_device()` 把 `auto` / `gpu` 映射为 `cuda`（可用时），否则 `cpu`，也接受显式 `cuda` / `cpu` / `mps` |
+| 网络与可学习参数 | `ActorCritic(...).to(self.device)`，`log_std` 同设备 |
+| PPO 更新的每个张量 | 全部用 `torch.as_tensor(..., device=self.device)` 显式放在同一设备上 |
+| Lightning | `Trainer(accelerator="auto" if --device auto else --device)` |
+| checkpoint 读取 | `torch.load(..., map_location=...)`，跨设备可读 |
+| 环境 / 滚动缓冲 / 渲染 | 纯 NumPy 与 Python，**始终在 CPU**，不需要也不应该搬到 GPU |
+
+所以：**换到有 N 卡的机器上，只要装对 torch wheel，`--device auto` 就会自动用 GPU，代码不用改。**
+
+### 在有 NVIDIA 显卡的机器上装环境
+
+```powershell
+conda create -n pendrl python=3.11 -y
+conda activate pendrl
+
+# 关键：装 CUDA 版 torch（不是 +cpu 那个）。CUDA 版本按你的驱动选，
+# 见 https://pytorch.org/get-started/locally/
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+pip install -r requirements.txt
+
+# 确认装对了：torch.version.cuda 不应该再是 None
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+python tests/test_sanity.py
+```
+
+### 在本机检查（当前这台是 CPU-only 的 wheel）
+
+```
+torch.__version__          = 2.14.0+cpu
+torch.version.cuda         = None        <- CPU-only wheel
+torch.cuda.is_available()  = False
+device_count               = 0
+```
+
+代码解析仍然正确（`--device cuda -> cuda`，只是没有卡可用）——**所以本机看到的
+`is_available() = False` 是 "torch 装的是 CPU 版"，不是 "程序不支持 CUDA"。**
+
+### checkpoint 跨机器通用
+
+PyTorch 的 `torch.save` 总是把张量存成 CPU 表示，读取时用 `map_location` 再搬到目标设备。
+因此：
+
+* 本机（CPU）训出的 `outputs/checkpoints/cont_p1/best.ckpt` **可以直接拿到 GPU 机器上 warm-start**：
+  ```powershell
+  python scripts/train.py --init-from <path>\cont_p1\best.ckpt --device auto ...
+  ```
+* 反过来，GPU 机器上训出的 checkpoint 也能在本机 CPU 上评估/续训。
+
+### 但是：这个任务的 GPU 加速比有限，请先量一下
+
+**环境仿真是纯 NumPy，跑在 CPU 上**，而它占了训练时间的大头：16 个环境 × 256 步 ×
+10 个物理子步，每个 iteration 要积分约 4 万个 RK4 子步。网络只有 2×256，
+前向/反向在这个规模上非常便宜。
+
+所以实际预期是：
+
+* **采样（rollout）阶段完全不受益于 GPU**，它由环境决定；
+* **更新阶段（PPO 的 10 epochs × 16 minibatches）会明显变快**；
+* 端到端加速比大概在 **1.2–2×** 量级，而不是 10×。
+
+如果换成大网络（`--hidden-sizes 512 512 512`）、或把 `--num-envs` 提到几百，
+GPU 的收益才会明显。想量化的话，同一配置各跑几十个 iteration 对比
+`perf/rollout_s` 与 `perf/update_s`（两个指标都已写进 `metrics.jsonl`）：
+
+```powershell
+python scripts/train.py --run-name gpu_bench --max-epochs 30 --device cuda --no-render
+python scripts/train.py --run-name cpu_bench --max-epochs 30 --device cpu  --no-render
+python -c "from scripts.show_metrics import *"   # 或直接看两个 metrics.jsonl 的 perf/* 字段
+```
+
+### 其它设备的注意事项
+
+* `--device` 取值：`auto`（默认）/ `cpu` / `cuda` / `mps`（Apple）。传 `gpu` 也会被解析为 `cuda`。
+* 传了 `--device cuda` 但机器没有可用 GPU 时，Lightning 会直接报错（这是好事：避免悄悄退回 CPU）。
+* 实时窗口（tkinter）与 GIF 导出（matplotlib + imageio）都在 CPU 上，不影响设备选择。
+* `--device mps` 在本项目未做专门验证；`mps` 上个别算子可能缺实现，如遇报错请退回 `cpu`。
+

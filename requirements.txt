@@ -1,7 +1,18 @@
 # Runtime dependencies for the RL inverted pendulum project.
+#
 #   python -m pip install -r requirements.txt
-# For a CPU-only PyTorch build (much smaller download):
-#   python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# PyTorch is installed separately because the right wheel depends on your GPU:
+#
+#   CPU only (small download, ~200 MB):
+#       pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+#   NVIDIA GPU (CUDA 12.8 build, ~2.5 GB) -- pick the CUDA version that matches
+#   your driver from https://pytorch.org/get-started/locally/ :
+#       pip install torch --index-url https://download.pytorch.org/whl/cu128
+#
+# Nothing in this project hard-codes a device: --device auto (the default) uses
+# CUDA when it is available, otherwise CPU. See README section 12.
 torch>=2.2
 pytorch-lightning>=2.2
 gymnasium>=0.29
