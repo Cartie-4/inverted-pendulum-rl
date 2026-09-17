@@ -1,0 +1,12 @@
+# Runtime dependencies for the RL inverted pendulum project.
+#   python -m pip install -r requirements.txt
+# For a CPU-only PyTorch build (much smaller download):
+#   python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+pytorch-lightning>=2.2
+gymnasium>=0.29
+numpy>=1.24
+matplotlib>=3.7
+imageio>=2.31
+pillow>=10.0
+tensorboard>=2.14

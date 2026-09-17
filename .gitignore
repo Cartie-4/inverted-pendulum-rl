@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------- run artefacts
+# Training outputs are large and reproducible: checkpoints, TensorBoard logs,
+# JSONL metrics, videos and trajectory plots all land here.
+outputs/
+!outputs/.gitkeep
+
+# Local scratch: diagnostic scripts, matplotlib cache, pip temp, debug logs.
+# Everything in here is throwaway tooling, not part of the project.
+.cache/
+
+# ---------------------------------------------------------------- python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---------------------------------------------------------------- environments
+# The conda environment lives inside the project when the global envs dir is not
+# writable, and venvs/virtualenvs may appear next to it.
+.conda-env/
+.conda-cache/
+.venv/
+venv/
+env/
+ENV/
+
+# ---------------------------------------------------------------- tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.log
+
+# ---------------------------------------------------------------- editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---------------------------------------------------------------- secrets
+.env
+.env.*
+*.pem
