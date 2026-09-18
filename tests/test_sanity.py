@@ -275,6 +275,61 @@ def test_rendering() -> None:
     check("rendering produces frames and a GIF", ok and frames[0].ndim == 3, f"{size} bytes")
 
 
+def test_curriculum_switches_both_env_sets() -> None:
+    """The initial-state curriculum must move validation with training.
+
+    Regression test for a real defect: ``on_train_epoch_start`` switched only
+    ``train_envs``, so ``val/mean_return`` (the metric that picks ``best.ckpt``)
+    kept scoring the warm-up distribution for the entire run.  A run whose
+    curriculum had moved on to a harder distribution would still hand back the
+    checkpoint that was best at the *old* one.
+    """
+    from pendulum_rl.lightning_module import PPOLightningModule, RolloutDataModule, TrainConfig
+
+    cfg = TrainConfig(
+        init_mode="random",
+        init_angle_limit=float(np.radians(15.0)),
+        warmup_init_mode="hanging",
+        curriculum_fraction=0.3,
+        max_epochs=10,
+        num_envs=2,
+        val_num_envs=2,
+        rollout_steps=8,
+    )
+    dm = RolloutDataModule(
+        [cfg.env_config() for _ in range(cfg.num_envs)],
+        [cfg.env_config(for_eval=True) for _ in range(cfg.val_num_envs)],
+        cfg.rollout_steps,
+        seed=0,
+    )
+    module = PPOLightningModule(cfg, dm)
+
+    class _StubTrainer:
+        current_epoch = 0
+
+    module.trainer = _StubTrainer()  # type: ignore[assignment]
+
+    module.trainer.current_epoch = 0  # 0% < 30% -> warm-up
+    module.on_train_epoch_start()
+    warm_train = dm.train_envs.cfg.init_mode
+    warm_val = dm.val_envs.cfg.init_mode
+
+    module.trainer.current_epoch = 5  # 50% > 30% -> main distribution
+    module.on_train_epoch_start()
+    main_train = dm.train_envs.cfg.init_mode
+    main_val = dm.val_envs.cfg.init_mode
+
+    # and the switch must reach the plant object the batch actually resets through
+    plant_mode = dm.train_envs.plant.cfg.init_mode
+    check(
+        "curriculum switches train AND val envs",
+        (warm_train, warm_val) == ("hanging", "hanging")
+        and (main_train, main_val) == ("random", "random")
+        and plant_mode == "random",
+        f"warm-up={warm_train}/{warm_val} -> main={main_train}/{main_val}, plant={plant_mode}",
+    )
+
+
 def test_batched_matches_scalar() -> None:
     """The vectorised plant must reproduce the scalar reference exactly."""
     rng = np.random.default_rng(0)
@@ -562,6 +617,7 @@ def main() -> int:
         test_cart_swingup_pumps_energy,
         test_batched_matches_scalar,
         test_energy_shaping_is_potential_based,
+        test_curriculum_switches_both_env_sets,
         test_sync_vector_env,
         test_terminate_angle,
         test_ppo_update,

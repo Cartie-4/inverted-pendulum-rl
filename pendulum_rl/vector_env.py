@@ -49,6 +49,19 @@ class SyncVectorEnv:
         self.finished_lengths.clear()
         self.finished_success.clear()
 
+    def set_init_mode(self, mode: str) -> None:
+        """Switch the initial-state curriculum for this whole vector env.
+
+        ``BatchedPendulum`` holds a single config object (``cfgs[0]``) and resets
+        through it, so every plant in the batch shares one initial-state
+        distribution.  Switching therefore means mutating that one object, which
+        is what the training loop used to reach into and do by hand.  Keeping the
+        operation here means the shared-object assumption lives next to the code
+        that depends on it, instead of in the training loop.
+        """
+        self.cfg.init_mode = mode  # type: ignore[assignment]
+        self.plant.cfg.init_mode = mode  # type: ignore[assignment]
+
     # ------------------------------------------------------------------- step
     def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         obs, rewards, done, info = self.plant.step(actions)

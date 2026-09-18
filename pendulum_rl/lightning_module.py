@@ -324,7 +324,16 @@ class PPOLightningModule(LightningModule):
         progress = self.trainer.current_epoch / max(1, self.cfg.max_epochs)
         # Entropy annealing + curriculum on the initial state distribution.
         self.agent.cfg.lr_lambda(progress)
-        self.dm.train_envs.cfg.init_mode = self.cfg.init_mode_at(progress)  # type: ignore[assignment]
+        mode = self.cfg.init_mode_at(progress)
+        # BOTH vector envs follow the curriculum.  Updating only the training envs
+        # (which is what this did) left validation pinned on the warm-up
+        # distribution for the whole run, so `val/mean_return` -- the metric that
+        # picks `best.ckpt` -- kept scoring "swing up from hanging" while the
+        # policy was actually being trained on the post-switch distribution.  A
+        # run could then finish with a best checkpoint chosen by a task it is no
+        # longer being asked to solve.
+        self.dm.train_envs.set_init_mode(mode)
+        self.dm.val_envs.set_init_mode(mode)
 
     # ------------------------------------------------------------ train step
     def training_step(self, batch, batch_idx):  # noqa: ARG002 - batch is a placeholder
