@@ -54,3 +54,13 @@ python scripts\train.py --init-from checkpoints\s2_full_best.ckpt --init-mode ra
 `p5_swing`、`p6_180_nt`、`s1_hanging`、`cont_p1`、`ppo_cart_upright`、`bc_warmstart`）是
 **中间尝试或已否决实验**，留在 `outputs/` 而不外发。其中 `bc_warmstart`（模仿预热，已判定为净负面）
 的结论记在 `scripts/imitation_warmstart.py` 的模块 docstring 里，不需要权重也能复现判读。
+
+同样**刻意排除**的还有两次负面实验的权重（结论见 `RESULTS.md` 第 5.5 节）：
+
+| run | 为什么不收 | 后果 |
+|---|---|---|
+| `s3_band` | 60–90° 窄带集中训练 255 迭代，成功率始终 0 | 其它带未退化，但目标带也没涨 |
+| `s4_a1_slow` / `s4_a2_wide` | 速率课程同样 0，且**毁掉了已有能力** | (135°,180°] 100% → **0%**，(90°,135°] 31.7% → 0% |
+
+把它们放进版本控制会把"更差的权重"当成里程碑；要复现判读用 `RESULTS.md` 里的配方即可。
+`s4_a1_slow/best.ckpt` 仍在 `outputs/checkpoints/` 里，未删除，只是不外发。
