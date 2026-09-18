@@ -101,6 +101,25 @@ def summarize(episodes: list[dict]) -> dict:
     }
 
 
+def check_seed_blocks(seeds: list[int], episodes: int) -> None:
+    """Refuse overlapping episode-seed blocks -- they are pseudo-replication.
+
+    ``evaluate.py`` resets with ``seed + episode``, so a run started at S covers
+    ``S .. S + episodes - 1``.  Ten runs of 20 episodes from 900..909 therefore
+    cover only episode seeds 900..928: 200 paired keys over 29 distinct states,
+    which would inflate McNemar's significance by counting the same state many
+    times.  Either use one seed with many episodes, or space the seeds apart.
+    """
+    blocks = sorted((seed, seed + episodes - 1) for seed in seeds)
+    for (a_low, a_high), (b_low, b_high) in zip(blocks, blocks[1:]):
+        if b_low <= a_high:
+            raise SystemExit(
+                f"seed blocks overlap: run {a_low} covers episode seeds {a_low}..{a_high}, run "
+                f"{b_low} covers {b_low}..{b_high}.  Use a single seed with --episodes N, or "
+                f"space the seeds by at least {episodes}."
+            )
+
+
 def pair_key(episode: dict) -> tuple[int, int]:
     """Identify one episode across runs.
 
@@ -119,6 +138,16 @@ def compare(baseline: list[dict], candidate: list[dict], tolerance: int, alpha: 
     shared = sorted(set(base_by_key) & set(cand_by_key))
     if not shared:
         raise SystemExit("the two evaluations share no seeds; pairing is impossible")
+
+    # Guard against pseudo-replication: with overlapping seed blocks several paired
+    # keys describe the *same* initial state, which would inflate the significance.
+    distinct_states = {
+        tuple(round(value, 9) for value in (base_by_key[key].get("init_state") or ()))
+        for key in shared
+    }
+    if len(distinct_states) < len(shared):
+        print(f"[paired-eval] WARNING: {len(shared)} paired keys cover only "
+              f"{len(distinct_states)} distinct initial states (overlapping seed blocks?)")
 
     both_ok = both_fail = fixed = broken = 0
     state_mismatch = 0
@@ -153,6 +182,7 @@ def compare(baseline: list[dict], candidate: list[dict], tolerance: int, alpha: 
 
     return {
         "paired_states": len(shared),
+        "distinct_states": len(distinct_states),
         "both_ok": both_ok,
         "fixed": fixed,
         "broken": broken,
@@ -204,7 +234,8 @@ def run_evaluations(args: argparse.Namespace, workdir: Path) -> tuple[Path, Path
 def print_report(result: dict, alpha: float) -> None:
     base, cand = result["baseline"], result["candidate"]
     print("=" * 70)
-    print(f"paired states     : {result['paired_states']}"
+    print(f"paired states     : {result['paired_states']} "
+          f"({result['distinct_states']} distinct initial states)"
           + (f"   (!! {result['state_mismatch']} with mismatched initial states)"
              if result["state_mismatch"] else ""))
     print(f"baseline  success : {base['successes']}/{base['episodes']} "
@@ -235,8 +266,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     source.add_argument("--baseline-ckpt", type=Path, help="run the baseline evaluation first")
     p.add_argument("--candidate-json", type=Path)
     p.add_argument("--candidate-ckpt", type=Path)
-    p.add_argument("--seeds", type=str, default="900-909", help="e.g. 900-909 or 900,901,902")
-    p.add_argument("--episodes", type=int, default=20, help="episodes per seed")
+    p.add_argument("--seeds", type=str, default="900",
+                   help="run seeds; episode seeds are seed..seed+episodes-1, so blocks must not "
+                        "overlap.  The default is one 200-episode block (900..1099)")
+    p.add_argument("--episodes", type=int, default=200, help="episodes per seed")
     p.add_argument("--init-mode", choices=["upright", "hanging", "random"], default=None)
     p.add_argument("--init-angle-limit", type=float, default=None, help="degrees")
     p.add_argument("--init-rate-limit", type=float, default=None)
@@ -260,6 +293,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.baseline_ckpt is not None:
+        check_seed_blocks(args.seed_list, args.episodes)
         workdir = args.workdir or (PROJECT_ROOT / "outputs" / "logs" / "paired" / args.candidate_ckpt.parent.name)
         baseline_json, candidate_json = run_evaluations(args, workdir)
     else:
