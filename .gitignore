@@ -4,6 +4,13 @@
 outputs/
 !outputs/.gitkeep
 
+# ...but the *trained weights* are not reproducible in any practical sense (they
+# are the product of hours of compute), so the milestone checkpoints are frozen
+# into `checkpoints/` and tracked.  See checkpoints/README.md for the inventory,
+# the SHA256 of each file and the measured score of each policy.
+!checkpoints/
+!checkpoints/**
+
 # Local scratch: diagnostic scripts, matplotlib cache, pip temp, debug logs.
 # Everything in here is throwaway tooling, not part of the project.
 .cache/
