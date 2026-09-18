@@ -128,13 +128,13 @@ class RolloutBuffer:
         self.log_probs = np.zeros(size, dtype=np.float32)
         self.values = np.zeros(size, dtype=np.float32)
         self.rewards = np.zeros(size, dtype=np.float32)
-        self.dones = np.zeros(size, dtype=np.float32)
+        self.terminals = np.zeros(size, dtype=np.float32)
         self.ptr = 0
 
     def __len__(self) -> int:
         return self.ptr
 
-    def add(self, obs, actions, log_probs, values, rewards, dones) -> None:
+    def add(self, obs, actions, log_probs, values, rewards, terminals) -> None:
         n = len(obs)
         sl = slice(self.ptr, self.ptr + n)
         self.obs[sl] = obs
@@ -142,23 +142,33 @@ class RolloutBuffer:
         self.log_probs[sl] = log_probs
         self.values[sl] = values
         self.rewards[sl] = rewards
-        self.dones[sl] = dones
+        #: True terminations only, *not* ``done`` -- see :meth:`compute_gae`.
+        self.terminals[sl] = terminals
         self.ptr += n
 
     def compute_gae(self, last_values: np.ndarray, steps: int, num_envs: int, cfg: PPOConfig) -> tuple[np.ndarray, np.ndarray]:
-        """GAE(lambda) over a (steps, num_envs) time-major view of the buffer."""
+        """GAE(lambda) over a (steps, num_envs) time-major view of the buffer.
+
+        ``terminals[t]`` must mark *true* terminations only, i.e. the pole falling
+        past ``terminate_angle``.  Truncations -- the rail limit, divergence, the
+        step cap -- have to keep bootstrapping: zeroing the bootstrap there hands the
+        policy a free escape from the -29.6/step of a fallen pole.  That is exactly
+        how run ``p5_swing`` collapsed: with the angle threshold removed, the rail was
+        the only escape left and the policy learned to end episodes in 20 steps by
+        driving off it (mean episode length 339 -> 20, approx_kl ~30, value loss
+        ~1e6).  HANDOFF section 6 intends a rail exit to be a truncation.
+        """
         advantages = np.zeros_like(self.rewards)
         last_gae = np.zeros(num_envs, dtype=np.float32)
         rewards = self.rewards.reshape(steps, num_envs)
         values = self.values.reshape(steps, num_envs)
-        dones = self.dones.reshape(steps, num_envs)
+        terminals = self.terminals.reshape(steps, num_envs)
         adv = advantages.reshape(steps, num_envs)
         for t in reversed(range(steps)):
             next_value = last_values if t == steps - 1 else values[t + 1]
-            next_non_terminal = 1.0 - (dones[t] if t == steps - 1 else dones[t + 1])
-            # `dones[t]` marks the transition t -> t+1, so bootstrap only when
-            # the next state is not terminal.
-            next_non_terminal = 1.0 - dones[t]
+            # `terminals[t]` marks the transition t -> t+1, so bootstrap unless the
+            # next state is a true terminal.
+            next_non_terminal = 1.0 - terminals[t]
             delta = rewards[t] + cfg.gamma * next_value * next_non_terminal - values[t]
             last_gae = delta + cfg.gamma * cfg.gae_lambda * next_non_terminal * last_gae
             adv[t] = last_gae

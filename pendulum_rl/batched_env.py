@@ -187,6 +187,11 @@ class BatchedPendulum:
             "out_of_rail": out_of_rail,
             "diverged": diverged,
             "fell_over": fell_over,
+            # Exposed separately from ``done`` so the PPO update can bootstrap
+            # through truncations (rail limit, divergence, step cap) and stop
+            # bootstrapping only at a true termination.
+            "terminated": terminated,
+            "truncated": truncated,
             "is_success": self.max_success_streak >= cfg.success_steps,
             "episode_return": self.episode_return.copy(),
             "balanced_streak": self.success_streak.copy(),

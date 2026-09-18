@@ -329,7 +329,13 @@ class PPOLightningModule(LightningModule):
             env_actions = (clipped * self.action_limit).astype(np.float32)
             next_obs, rewards, dones = envs.step(env_actions)
             self.agent.obs_rms.update(self._obs)
-            self.buffer.add(self._obs, clipped, log_probs, values, rewards, dones)
+            # GAE takes the *termination* mask, not `done`: a truncated episode (rail
+            # limit, divergence, step cap) must still bootstrap, otherwise ending an
+            # episode early is a free escape from a fallen pole's -29.6/step.
+            self.buffer.add(
+                self._obs, clipped, log_probs, values, rewards,
+                np.asarray(envs.last_info["terminated"], dtype=np.float32),
+            )
             self._obs = next_obs
 
             # --- live view: follow one environment, drawn with the *pre-step*
