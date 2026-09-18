@@ -96,6 +96,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "than it was trained on, e.g. --init-angle-limit 45.",
     )
     p.add_argument(
+        "--init-angle-center",
+        type=float,
+        default=0.0,
+        help="with --init-angle-limit: draw theta ~ U(center-limit, center+limit) in DEGREES.  E.g. "
+             "--init-angle-center 30 --init-angle-limit 15 evaluates exactly the 15..45 deg band of "
+             "the curriculum instead of the whole 0..45 deg range, which is what the per-stage band "
+             "metric needs.",
+    )
+    p.add_argument(
         "--init-rate-limit",
         type=float,
         default=None,
@@ -117,6 +126,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "training horizon (500 steps = 10 s), so a run reports episodes of the same length "
              "the policy was trained on. Use 0 for truly unlimited (only sensible in --render "
              "mode, where you close the window).",
+    )
+    p.add_argument(
+        "--episode-pause",
+        type=float,
+        default=0.0,
+        help="with --render: seconds to dwell on the frozen last frame between episodes.  A fall "
+             "from a large tilt crosses the threshold in ~0.2 s, so without a pause the failures "
+             "flash past before they can be seen.",
     )
     p.add_argument(
         "--wall-timeout",
@@ -231,6 +248,13 @@ def _run_live(env, controller, env_cfg, args) -> dict:
     print("            close the window to stop, or press Ctrl+C.")
     episodes_shown, returns, durations = 0, [], []
     failures: list[str] = []
+    #: Per-episode "did this episode ever satisfy the success criterion"
+    #: (|theta| < success_angle, |x| < success_x_range, |theta_dot| < 1.5, held for
+    #: success_steps steps).  Kept in the same terms as the head-less batch path so
+    #: that a live run and a batch run report the *same* number under the same
+    #: label; the old code reported "no episode suffered a physical failure" here,
+    #: which the summary then printed as if it were the 100-step criterion.
+    successes: list[bool] = []
     theta_window: deque[float] = deque(maxlen=100)
     history: dict[str, list[float]] = {"theta": [], "x": [], "u": [], "reward": []}
     theta_sq_all: list[float] = []
@@ -248,6 +272,7 @@ def _run_live(env, controller, env_cfg, args) -> dict:
         while True:
             obs, _ = env.reset(seed=args.seed + episodes_shown)
             ep_return, step = 0.0, 0
+            max_streak = 0
             while True:
                 loop_start = time.perf_counter()
                 action = controller(env, obs)
@@ -256,6 +281,8 @@ def _run_live(env, controller, env_cfg, args) -> dict:
                 step += 1
                 theta_sq_all.append(info["theta"] ** 2)
                 action_abs_all.append(abs(action))
+                if "balanced_streak" in info:
+                    max_streak = max(max_streak, int(info["balanced_streak"]))
                 if not first_episode_done:
                     history["theta"].append(info["theta"])
                     history["x"].append(info["x"])
@@ -302,9 +329,16 @@ def _run_live(env, controller, env_cfg, args) -> dict:
             durations.append(step * env_cfg.control_dt)
             episodes_shown += 1
             failures.append(ending_reason(info, terminated, truncated))
+            successes.append(bool(info.get("is_success", False)) or max_streak >= env_cfg.success_steps)
             first_episode_done = True
             print(f"[live-view] episode {episodes_shown}: held {durations[-1]:.1f} s "
                   f"({step} steps), return {ep_return:.1f}, ending: {failures[-1]}")
+            if args.episode_pause > 0:
+                viewer.draw_status(
+                    f"episode {episodes_shown}: held {durations[-1]:.1f} s - {failures[-1]}",
+                    f"next episode in {args.episode_pause:.1f} s",
+                )
+                time.sleep(args.episode_pause)
             if args.render_seconds and time.perf_counter() - t0 >= args.render_seconds:
                 raise KeyboardInterrupt
     except KeyboardInterrupt:
@@ -316,6 +350,7 @@ def _run_live(env, controller, env_cfg, args) -> dict:
             durations.append(step * env_cfg.control_dt)
             episodes_shown += 1
             failures.append("stopped by user")
+            successes.append(bool(info.get("is_success", False)) or max_streak >= env_cfg.success_steps)
             print(f"[live-view] stopped mid-episode after {durations[-1]:.1f} s "
                   f"({step} steps), still standing")
     finally:
@@ -333,7 +368,8 @@ def _run_live(env, controller, env_cfg, args) -> dict:
         "theta_rms_deg": float(np.degrees(np.sqrt(np.mean(theta_sq_all)))) if theta_sq_all else float("nan"),
         "mean_abs_action_frac": (float(np.mean(action_abs_all) / env_cfg.action_limit)
                                  if action_abs_all else float("nan")),
-        "success_rate": 1.0 if failures and all(f not in ("fell over", "out of rail", "diverged") for f in failures) else 0.0,
+        "success_rate": float(np.mean(successes)) if successes else float("nan"),
+        "successes": successes,
         "mean_return": float(np.mean(returns)) if returns else float("nan"),
         "mean_hold_s": float(np.mean(durations)) if durations else float("nan"),
         "max_hold_s": float(np.max(durations)) if durations else float("nan"),
@@ -397,6 +433,7 @@ def main(argv: list[str] | None = None) -> int:
             env_cfg,
             init_mode="random",
             init_angle_limit=float(np.radians(args.init_angle_limit)),
+            init_angle_center=float(np.radians(args.init_angle_center)),
             init_rate_limit=(args.init_rate_limit if args.init_rate_limit is not None else 0.5),
         )
     elif args.init_rate_limit is not None:
@@ -421,7 +458,6 @@ def main(argv: list[str] | None = None) -> int:
         horizon = None
     else:
         horizon = env_cfg.max_episode_steps  # checkpoint default (training horizon)
-    env_cfg = replace(env_cfg, max_episode_steps=horizon)
     env_cfg = replace(env_cfg, max_episode_steps=horizon)
     env = InvertedPendulumEnv(env_cfg)
     name, controller = build_controller(args, env)
@@ -619,7 +655,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"theta RMS         : {summary['theta_rms_deg']:8.2f} deg")
     print(f"mean |u| / u_max  : {summary['mean_abs_action_frac']:8.3f}")
     print(f"success rate      : {summary['success_rate']:8.1%}  "
-          f"(|theta| < {env_cfg.success_angle} rad for {env_cfg.success_steps} steps)")
+          f"(|theta| < {np.degrees(env_cfg.success_angle):.1f} deg for {env_cfg.success_steps} steps, "
+          f"|x| < {env_cfg.success_x_range} m)")
     if video_path:
         print(f"video             : {video_path}")
     if plot_path:
