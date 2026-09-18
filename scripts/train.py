@@ -58,6 +58,11 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         init_angle_limit=(None if args.init_angle_limit is None
                           else float(np.radians(args.init_angle_limit))),
         init_rate_limit=args.init_rate_limit,
+        # CLI is in DEGREES, like evaluate.py's flag of the same name.  Without
+        # this the post-curriculum "band" silently collapsed onto upright: an
+        # --init-angle-limit of 15 with the default centre samples +-15 deg, not
+        # the 60..90 deg window the flag was meant to describe.
+        init_angle_center=float(np.radians(args.init_angle_center)),
         warmup_init_mode=args.warmup_init_mode,
         curriculum_fraction=args.curriculum_fraction,
         max_episode_steps=args.max_episode_steps,
@@ -141,6 +146,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="with --init-angle-limit: also draw the rates (x_dot, theta_dot) from "
              "U(-limit, +limit); default 0.5 rad/s.",
+    )
+    task.add_argument(
+        "--init-angle-center",
+        type=float,
+        default=0.0,
+        help="with --init-angle-limit: draw theta ~ U(center-limit, center+limit), in DEGREES. "
+             "Default 0 centres the curriculum on upright, so --init-angle-limit 15 means "
+             "+-15 deg.  Use e.g. --init-angle-center 75 --init-angle-limit 15 to train on "
+             "exactly the 60..90 deg band; this is the same convention (and flag name) as "
+             "evaluate.py.  Ignored for the upright/hanging start modes.",
     )
     task.add_argument("--max-episode-steps", type=int, default=500, help="10 s at 50 Hz")
     task.add_argument("--control-dt", type=float, default=0.02, help="agent decision period [s]")
