@@ -446,6 +446,10 @@ class PPOLightningModule(LightningModule):
         returns = np.zeros(envs.num_envs)
         lengths = np.zeros(envs.num_envs, dtype=int)
         max_streak = np.zeros(envs.num_envs)
+        #: Whether an env has already contributed its first episode to the metrics.
+        #: The vector env rolls straight into a new episode on ``done``, so without
+        #: this mask the partial rollover episode at the horizon would be counted too.
+        scored = np.zeros(envs.num_envs, dtype=bool)
         episode_returns: list[float] = []
         episode_success: list[bool] = []
         episode_lengths: list[int] = []
@@ -467,10 +471,20 @@ class PPOLightningModule(LightningModule):
             max_streak = np.maximum(max_streak, envs.last_info["balanced_streak"])
             for i in range(envs.num_envs):
                 if dones[i]:
-                    if lengths[i] >= cfg.success_steps:  # only count real episodes
+                    if not scored[i]:
+                        # Score the env's FIRST episode however short it is.  The old
+                        # `lengths[i] >= cfg.success_steps` guard was meant to skip
+                        # rollover episodes, but it also discarded every fast failure
+                        # and turned both validation metrics into survivorship
+                        # statistics: measured on a +-90 deg validation set, 98.9%
+                        # reported against 45.5% when every episode counts (108 of 200
+                        # episodes died inside 100 steps, all of them failures, and all
+                        # of them dropped).  CheckpointEveryEpoch monitors
+                        # val/mean_return, so that bias also picked best.ckpt.
                         episode_returns.append(float(returns[i]))
                         episode_success.append(bool(max_streak[i] >= cfg.success_steps))
                         episode_lengths.append(int(lengths[i]))
+                        scored[i] = True
                     returns[i] = 0.0
                     lengths[i] = 0
                     max_streak[i] = 0.0
@@ -478,8 +492,9 @@ class PPOLightningModule(LightningModule):
         # Episodes still in flight at the horizon: score them on the return
         # actually collected.  Without this a short/early-terminating policy
         # produces an empty list and the metric becomes NaN, which silently
-        # disables the checkpoint monitor.
-        in_flight = lengths > 0
+        # disables the checkpoint monitor.  Envs whose first episode was already
+        # scored are excluded: they are mid-rollover and would be double counted.
+        in_flight = (lengths > 0) & ~scored
         scored_returns = list(episode_returns) + [float(returns[i]) for i in np.flatnonzero(in_flight)]
         scored_success = list(episode_success) + [
             bool(max_streak[i] >= cfg.success_steps) for i in np.flatnonzero(in_flight)
