@@ -38,6 +38,7 @@ from gymnasium import spaces
 
 ModelName = Literal["cart", "pivot"]
 InitMode = Literal["upright", "hanging", "random"]
+ShapingMode = Literal["none", "energy"]
 ActionMode = Literal["force", "acceleration"]
 
 MODEL_CART: ModelName = "cart"
@@ -97,6 +98,40 @@ class EnvConfig:
     #: hanging (``init_angle_center=pi``) instead of near upright.
     init_angle_center: float = 0.0
 
+    # --- reward shaping (potential-based, off by default) ----------------
+    #: ``"none"`` keeps the historical reward bit-for-bit.  ``"energy"`` adds
+    #: ``F(s, s') = gamma * Phi(s') - Phi(s)`` with
+    #: ``Phi(s) = -shape_coef * (E_pend(s) - E*) ** 2``.
+    #:
+    #: This is *potential-based reward shaping* in the sense of Ng, Harada &
+    #: Russell (1999).  Summed over an episode the term is
+    #:
+    #:     sum_t F_t = gamma * Phi(s_T) - Phi(s_0) - (1 - gamma) * sum_t Phi(s_t)
+    #:
+    #: The last piece is the only one that does not cancel, and it is
+    #: *state-only*: at a fixed state it is the same number for every action, so
+    #: ``argmax_a Q(s, a)`` is unchanged -- the shaping cannot make "fall over and
+    #: pump" or "spin forever" a better plan than balancing.  (An event bonus for
+    #: flipping the pole up has no such argument, and is farmable by falling down
+    #: and flipping again.)  What the shaping buys is a dense gradient towards the
+    #: pumping behaviour, which i.i.d. Gaussian exploration cannot find on its own
+    #: (it satisfies ``E[a theta_dot cos theta] = 0``, so it shakes the pole
+    #: instead of pumping it).
+    #:
+    #: ``E_pend`` is the pendulum's energy in the cart frame, measured from the
+    #: hanging-at-rest state: it rises from 0 (hanging) to ``E* = 2 m g l``
+    #: (upright at rest), see ``pendulum_energy``.  Two properties matter for a
+    #: balance-warm-started curriculum: ``Phi`` peaks at the upright equilibrium
+    #: (``gap = 0``), so ``Phi`` *and its gradient* vanish there and the shaping is
+    #: silent exactly where balance lives; and pumping *past* ``E*`` turns the
+    #: shaping negative, which damps the "spin the pole round and round" failure
+    #: mode instead of rewarding it.
+    shaping: ShapingMode = "none"
+    shape_coef: float = 1.0
+    #: Discount used by the shaping term only.  Keep it equal to the PPO gamma:
+    #: the invariance guarantee is stated for the MDP actually being solved.
+    shape_gamma: float = 0.99
+
     # --- reward & termination -------------------------------------------
     # r = A(theta) - w_theta*theta^2 - w_x*x^2 - w_v*x_dot^2
     #              - w_omega*theta_dot^2 - w_u*util^2
@@ -146,6 +181,15 @@ class EnvConfig:
         # A(pi) = (-1)^p + offset, so offset = 1 for odd p (A(pi) = 0) and
         # offset = 0 for even p (A(pi) = 1 - 1 = 0).
         self.a_theta_offset = float(self.a_theta_power % 2)
+        self.shape_energy_target = 2.0 * self.m_pole * self.gravity * self.l_pole
+        if self.shaping not in ("none", "energy"):
+            raise ValueError(f"unknown shaping mode: {self.shaping!r}")
+        if self.shape_coef < 0:
+            raise ValueError("shape_coef must be non-negative")
+
+    #: target pendulum energy of the shaping potential, ``E* = 2 m g l`` [J]
+    #: (0 = hanging at rest, ``E*`` = upright at rest).
+    shape_energy_target: float = field(default=1.0, init=False)
 
     #: normalisation constant of the upright reward term (set in __post_init__)
     a_theta_offset: float = field(default=1.0, init=False)
@@ -194,6 +238,7 @@ class InvertedPendulumEnv(gym.Env):
         self._elapsed = 0.0
         self._success_streak = 0
         self._max_success_streak = 0
+        self._shape_prev = 0.0
         self._viewer = None
 
     # ------------------------------------------------------------------ core
@@ -248,6 +293,7 @@ class InvertedPendulumEnv(gym.Env):
         self._elapsed = 0.0
         self._success_streak = 0
         self._max_success_streak = 0
+        self._shape_prev = self._shape_potential()
         return self._obs(), self._info()
 
     def step(self, action):
@@ -293,6 +339,15 @@ class InvertedPendulumEnv(gym.Env):
             truncated = True
         if truncated or terminated:
             reward -= 0.0  # no extra penalty; the drop in reward is signal enough
+
+        # --- potential-based shaping (no-op unless cfg.shaping == "energy") ----
+        # F(s, s') = gamma * Phi(s') - Phi(s).  A terminal state has no successor,
+        # so the standard convention Phi(s_terminal) = 0 applies to *that* term
+        # only; Phi(s) still enters as the state we actually left.
+        if cfg.shaping == "energy":
+            shape_next = 0.0 if terminated else self._shape_potential()
+            reward += cfg.shape_gamma * shape_next - self._shape_prev
+            self._shape_prev = shape_next
 
         # --- success bookkeeping -----------------------------------------
         balanced = (
@@ -423,15 +478,29 @@ class InvertedPendulumEnv(gym.Env):
     def pendulum_energy(self) -> float:
         """Energy of the pendulum alone, seen from the cart frame.
 
-        This is the quantity the classical swing-up law pumps: 0 when the pole
-        is upright and at rest relative to the cart, -2 m g l when hanging.
+        This is the quantity the classical swing-up law pumps, measured from the
+        upright-at-rest state: ``m g l (cos(theta) + 1) + 0.5 m (l theta_dot)^2``
+        is ``E* = 2 m g l`` when the pole is upright and at rest and 0 when it
+        hangs at rest.  The classical energy controller drives the *difference*
+        ``E_pend - E*`` (and hence the shape of the ``energy`` shaping potential)
+        to zero; it is the quantity the cart frame can actually pump.
         """
+        return float(self._pendulum_energy_value())
+
+    def _pendulum_energy_value(self):
+        """``pendulum_energy`` without the float() cast, so subclasses (and the
+        batched twin in ``pendulum_rl/batched_env.py``) can reuse the formula."""
         cfg = self.cfg
         theta = self.state[1]
         theta_dot = self.state_dot[1]
         kinetic = 0.5 * cfg.m_pole * (cfg.l_pole * theta_dot) ** 2
         potential = cfg.m_pole * cfg.gravity * cfg.l_pole * (np.cos(theta) + 1.0)
-        return float(kinetic + potential)
+        return kinetic + potential
+
+    def _shape_potential(self) -> float:
+        """``Phi(s) = -shape_coef * (E_pend(s) - E*) ** 2`` (0 at upright rest)."""
+        gap = self._pendulum_energy_value() - self.cfg.shape_energy_target
+        return -self.cfg.shape_coef * gap**2
 
     def render(self):  # pragma: no cover - exercised only in demos
         from .rendering import render_frame

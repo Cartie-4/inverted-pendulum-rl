@@ -47,6 +47,9 @@ class BatchedPendulum:
         self.success_streak = np.zeros(n, dtype=np.int64)
         self.max_success_streak = np.zeros(n, dtype=np.int64)
         self.episode_return = np.zeros(n)
+        #: Phi(s) of the state each plant is about to leave, for potential-based
+        #: reward shaping.  Must be re-synced on every reset (see ``reset``).
+        self.shape_prev = np.zeros(n)
 
     # ------------------------------------------------------------------ reset
     def reset(self, mask: np.ndarray, init_mode: str | None = None, rngs: list[np.random.Generator] | None = None) -> None:
@@ -107,6 +110,10 @@ class BatchedPendulum:
         self.success_streak[idx] = 0
         self.max_success_streak[idx] = 0
         self.episode_return[idx] = 0.0
+        # The fresh state is where the next transition starts from, so the
+        # shaping potential has to be re-read here; carrying the value from the
+        # state the plant died in would inject a spurious one-off reward.
+        self.shape_prev[idx] = self._shape_potential()[idx]
 
     # -------------------------------------------------------------------- obs
     def obs(self) -> np.ndarray:
@@ -173,6 +180,15 @@ class BatchedPendulum:
         truncated = failed & ~terminated
         if cfg.max_episode_steps is not None:
             truncated = truncated | (self.steps >= cfg.max_episode_steps)
+
+        # --- potential-based shaping (no-op unless cfg.shaping == "energy") ----
+        # F(s, s') = gamma * Phi(s') - Phi(s), with the standard convention that a
+        # terminal state has no successor: Phi(s_terminal) = 0.  Truncation is not
+        # terminal -- the rollout bootstraps through it -- so Phi(s') is kept.
+        if cfg.shaping == "energy":
+            phi_next = np.where(terminated, 0.0, self._shape_potential())
+            reward = reward + cfg.shape_gamma * phi_next - self.shape_prev
+            self.shape_prev = phi_next
 
         balanced = (np.abs(theta) < cfg.success_angle) & (np.abs(x) < cfg.success_x_range) & (np.abs(theta_dot) < 1.5)
         self.success_streak = np.where(balanced, self.success_streak + 1, 0)
@@ -265,6 +281,24 @@ class BatchedPendulum:
         else:
             kinetic = 0.5 * cfg.m_pole * (cfg.l_pole * theta_dot) ** 2
         return kinetic + cfg.m_pole * cfg.gravity * cfg.l_pole * (np.cos(theta) + 1.0)
+
+    def pendulum_energies(self) -> np.ndarray:
+        """``env.pendulum_energy()`` for the whole batch.
+
+        Note this is *not* ``energies()``: that one includes the cart's kinetic
+        energy, which is why it can read "25x E*" while the pole has barely
+        moved.  The cart-frame pendulum energy is the quantity the shaping
+        potential and the classical swing-up law both use.
+        """
+        cfg = self.cfg
+        theta, theta_dot = self.state.theta, self.state.theta_dot
+        kinetic = 0.5 * cfg.m_pole * (cfg.l_pole * theta_dot) ** 2
+        return kinetic + cfg.m_pole * cfg.gravity * cfg.l_pole * (np.cos(theta) + 1.0)
+
+    def _shape_potential(self) -> np.ndarray:
+        """``Phi(s) = -shape_coef * (E_pend(s) - E*) ** 2`` for the whole batch."""
+        gap = self.pendulum_energies() - self.cfg.shape_energy_target
+        return -self.cfg.shape_coef * gap**2
 
 
 def _scale(value: np.ndarray, half_range: float) -> np.ndarray:

@@ -94,6 +94,15 @@ class TrainConfig:
     warmup_init_mode: str | None = None
     curriculum_fraction: float = 0.4
 
+    # reward shaping: potential-based, off by default so the historical reward is
+    # reproduced bit-for-bit.  See EnvConfig.shaping for why this cannot change
+    # the optimal policy.
+    shaping: str = "none"
+    shape_coef: float = 1.0
+    #: Discount of the shaping term.  Set from ``gamma`` unless overridden, so the
+    #: invariance statement holds for the MDP PPO is actually solving.
+    shape_gamma: float | None = None
+
     # algorithm
     learning_rate: float = 3e-4
     gamma: float = 0.99
@@ -150,6 +159,9 @@ class TrainConfig:
             terminate_on_limit=False if for_eval else self.terminate_on_limit,
             # Never apply the "fell over" rule while the pole has to swing up.
             terminate_angle=self.effective_terminate_angle(for_eval=for_eval),
+            shaping=self.shaping,
+            shape_coef=self.shape_coef,
+            shape_gamma=self.gamma if self.shape_gamma is None else self.shape_gamma,
         )
 
     def effective_terminate_angle(self, for_eval: bool = False) -> float | None:

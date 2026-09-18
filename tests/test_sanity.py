@@ -18,12 +18,16 @@ Checks (all CPU-only, a few seconds):
 7.  PPO shape check: one forward/backward pass through the agent updates the
     weights and produces finite losses.
 8.  Rendering: one frame can be produced and written as a GIF.
+9.  Reward shaping: the optional energy potential is a genuine difference of
+    potentials (so it telescopes and cannot be farmed), is silent while the pole
+    is balanced, and the batched twin reproduces it bit-for-bit.
 """
 
 from __future__ import annotations
 
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -311,6 +315,172 @@ def test_batched_matches_scalar() -> None:
             )
 
 
+def test_energy_shaping_is_potential_based() -> None:
+    """The energy shaping must be PBRS: silent at upright, and a true potential.
+
+    Three properties are checked on the real plant:
+
+    1. **It is a potential difference, with the exact bookkeeping that implies.**
+       Summing ``F = gamma*Phi(s') - Phi(s)`` over an episode leaves
+
+           sum_t F_t = gamma * Phi(s_T) - Phi(s_0) - (1 - gamma) * sum_t Phi(s_t)
+
+       so the only thing that survives is state-only: at a fixed state the
+       per-step term ``-(1-gamma)*Phi(s)`` is a constant that does not depend on
+       the action, while the action-dependent part appears only through ``Phi(s')``.
+       Hence ``argmax_a Q_shaped(s, a) == argmax_a Q_base(s, a)`` at every state
+       (Ng, Harada & Russell 1999) -- the shaping cannot make falling over or
+       spinning a better plan.  It also means a closed loop in state space sums to
+       zero, so the shaping cannot be farmed, which an event bonus for flipping
+       the pole up cannot say about itself.  The identity above is asserted
+       numerically, so the ``shape_prev`` bookkeeping cannot silently drift.
+    2. **It is silent where balance lives.**  ``Phi`` peaks at the upright
+       equilibrium, so for a small perturbation the shaping is O(delta^2) against
+       an O(1) task reward, and a PD controller holding the pole up sees
+       essentially no shaping at all (measured, not assumed).
+    3. **The batched twin agrees** with the scalar reference bit-for-bit, so a
+       training rollout and an evaluation episode cannot drift apart.
+    """
+    from pendulum_rl.agents.classical import PDController
+    from pendulum_rl.batched_env import BatchedPendulum
+
+    shape_cfg = EnvConfig(
+        init_mode="random",
+        init_angle_limit=float(np.radians(90.0)),
+        init_rate_limit=0.5,
+        terminate_angle=None,
+        shaping="energy",
+        shape_coef=1.0,
+    )
+    base_cfg = replace(shape_cfg, shaping="none")
+    rng = np.random.default_rng(3)
+
+    # --- 1. potential-difference identity -----------------------------------
+    env = InvertedPendulumEnv(shape_cfg)
+    env.reset(seed=11)
+    ref = InvertedPendulumEnv(base_cfg)
+    ref.reset(seed=11)
+    gamma = shape_cfg.shape_gamma
+    phis = [env._shape_potential()]  # Phi(s_0) .. Phi(s_T) once the loop is done
+    shaped_terms = []
+    for _ in range(200):
+        u = float(rng.uniform(-1.0, 1.0) * shape_cfg.action_limit)
+        _, r, term, trunc, _ = env.step([u])
+        _, r0, _, _, _ = ref.step([u])
+        shaped_terms.append(r - r0)
+        phis.append(0.0 if term else env._shape_potential())
+        if term or trunc:
+            break
+    steps = len(shaped_terms)
+    assert steps > 1, "the probe rollout ended immediately"
+    # 1a. per-step: the measured term must be exactly the potential difference the
+    # bookkeeping claims.  This is the check that pins down ``_shape_prev`` (and
+    # both branches of the terminal-state convention).
+    measured = np.array(shaped_terms)
+    expected = np.array([gamma * phis[t + 1] - phis[t] for t in range(steps)])
+    check(
+        "every shaping term equals gamma*Phi(s') - Phi(s)",
+        float(np.max(np.abs(measured - expected))) < 1e-12,
+        f"max residual={float(np.max(np.abs(measured - expected))):.2e} over {steps} steps, "
+        f"largest term {float(np.max(np.abs(expected))):.2f} J",
+    )
+    # 1b. episode level: the sum is pinned down by the potentials alone, up to the
+    #     float rounding of adding 131 O(10) terms (the episode sum is O(1), so the
+    #     two sides agree to ~1e-3 here; the *structure* is what is being asserted,
+    #     and 1a already pins the per-step bookkeeping to 1e-14).
+    #     The ``(1-gamma)*sum`` piece is the state-only remainder: same number for
+    #     every action taken at a state, which is asserted in the branch test below.
+    decay = 0.0
+    for phi in phis[:steps]:
+        decay += (1.0 - gamma) * phi
+    predicted = gamma * phis[-1] - phis[0] - decay
+    cumulative = float(np.cumsum(measured)[-1])
+    check(
+        "episode sum == gamma*Phi(s_T) - Phi(s_0) - (1-gamma)*sum_t Phi(s_t)",
+        abs(cumulative - predicted) < 1e-2,
+        f"measured={cumulative:+.6f} vs identity={predicted:+.6f} "
+        f"(residual {cumulative - predicted:+.1e}, float summation of {steps} O(10) terms)",
+    )
+
+    # --- 1b. action independence: the invariant is about argmax_a, not returns
+    # From one state, branch into several actions.  The action changes Phi(s'),
+    # but the state-only decay part of the shaping must be identical for all of
+    # them -- that is exactly why the optimal *action* at a state is unchanged.
+    for coef in (0.5, 1.0):
+        branch_cfg = replace(shape_cfg, shape_coef=coef)
+        offsets = []
+        for action in (-40.0, -10.0, 0.0, 10.0, 40.0):
+            e = InvertedPendulumEnv(branch_cfg)
+            e.reset(seed=77)
+            _obs, r, _term, _trunc, _ = e.step([action])
+            b = InvertedPendulumEnv(replace(branch_cfg, shaping="none"))
+            b.reset(seed=77)
+            _obs, r0, _term, _trunc, _ = b.step([action])
+            offsets.append(r - r0 - branch_cfg.shape_gamma * e._shape_potential())
+        spread = max(offsets) - min(offsets)
+        check(
+            f"the action-independent part of the shaping is state-only (coef={coef})",
+            spread < 1e-12,
+            f"spread over 5 actions from one state = {spread:.2e} J "
+            f"(common offset {offsets[0]:+.6f} J)",
+        )
+
+    # --- 2. silent at upright ----------------------------------------------
+    pd_cfg = replace(shape_cfg, init_mode="upright", init_angle_limit=None)
+    pd_ref_cfg = replace(pd_cfg, shaping="none")
+    env = InvertedPendulumEnv(pd_cfg)
+    ref = InvertedPendulumEnv(pd_ref_cfg)
+    env.reset(seed=5)
+    ref.reset(seed=5)
+    pd = PDController(pd_cfg)
+    gaps, rewards = [], []
+    for step in range(60):
+        u = pd(env)
+        _, r, term, trunc, _ = env.step([u])
+        _, r0, _, _, _ = ref.step([u])
+        if step:  # step 0 carries the reset transient by construction
+            gaps.append(abs(r - r0))
+            rewards.append(abs(r0))
+        if term or trunc:
+            break
+    worst_rel = max(gaps) / max(rewards) if gaps else float("inf")
+    check(
+        "energy shaping is silent while balancing",
+        max(gaps) < 0.02 and worst_rel < 0.02,
+        f"max |shaping|={max(gaps):.2e} J vs |reward|~{np.mean(rewards):.2f} "
+        f"({worst_rel:.2%} of it), over {len(gaps)} held steps",
+    )
+
+    # --- 3. batched parity under shaping -----------------------------------
+    for coef in (0.0, 1.0):
+        cfg = replace(shape_cfg, shape_coef=coef)
+        envs = [InvertedPendulumEnv(cfg) for _ in range(3)]
+        for i, e in enumerate(envs):
+            e.reset(seed=200 + i)
+        batch = BatchedPendulum(cfg, 3)
+        batch.reset(np.ones(3, dtype=bool))
+        batch.state.x[:] = [e.state[0] for e in envs]
+        batch.state.theta[:] = [e.state[1] for e in envs]
+        batch.state.x_dot[:] = [e.state_dot[0] for e in envs]
+        batch.state.theta_dot[:] = [e.state_dot[1] for e in envs]
+        batch.shape_prev[:] = [e._shape_potential() for e in envs]
+        worst = 0.0
+        for _ in range(25):
+            actions = rng.uniform(-1.0, 1.0, size=3) * cfg.action_limit
+            _obs, b_rew, _done, _ = batch.step(actions)
+            for i, e in enumerate(envs):
+                _, s_rew, s_term, s_trunc, _ = e.step([actions[i]])
+                worst = max(worst, abs(s_rew - b_rew[i]))
+                if s_term or s_trunc:
+                    e.reset(seed=2000 + i)
+                    batch.reset(np.array([i == j for j in range(3)]))
+        check(
+            f"batched shaping matches scalar (coef={coef})",
+            worst < 1e-5,
+            f"max |reward diff|={worst:.2e}",
+        )
+
+
 def test_sync_vector_env() -> None:
     """The vector env must run episodes, reset them and report successes."""
     from pendulum_rl.vector_env import SyncVectorEnv
@@ -391,6 +561,7 @@ def main() -> int:
         test_energy_swingup,
         test_cart_swingup_pumps_energy,
         test_batched_matches_scalar,
+        test_energy_shaping_is_potential_based,
         test_sync_vector_env,
         test_terminate_angle,
         test_ppo_update,

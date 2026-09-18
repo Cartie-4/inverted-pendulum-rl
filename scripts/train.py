@@ -78,6 +78,9 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         # silent no-op: 11.5 "rad" is ~659 deg and can never be exceeded.
         terminate_angle=(float(np.radians(args.terminate_angle))
                          if args.terminate_angle > 0 else None),
+        shaping=args.shaping,
+        shape_coef=args.shaping_coef,
+        shape_gamma=args.shaping_gamma,
         learning_rate=args.learning_rate,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
@@ -165,6 +168,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="end an episode when |theta| exceeds this many DEGREES (pole fell over); "
              "0 disables. Automatically ignored for swing-up tasks (hanging starts), "
              "where the pole must be free to sweep through pi/2.",
+    )
+    task.add_argument(
+        "--shaping",
+        choices=["none", "energy"],
+        default="none",
+        help="potential-based reward shaping. 'energy' adds "
+             "gamma*Phi(s')-Phi(s) with Phi = -coef*(E_pend - 2mgl)^2, which is "
+             "provably policy-invariant (Ng et al. 1999) and silent at upright, but "
+             "gives the pumping behaviour a dense gradient that i.i.d. Gaussian "
+             "exploration cannot find. Default 'none' = unchanged reward.",
+    )
+    task.add_argument(
+        "--shaping-coef",
+        type=float,
+        default=1.0,
+        help="coefficient c of the energy shaping potential; the per-step shaping "
+             "is O(c * (dE_pend per step) * (E_pend - E*)) ~ 0.5 at c=1 while "
+             "pumping, i.e. the same order as the upright reward.",
+    )
+    task.add_argument(
+        "--shaping-gamma",
+        type=float,
+        default=None,
+        help="discount used by the shaping term only; default = --gamma, which is "
+             "what the policy-invariance guarantee assumes.",
     )
 
     alg = p.add_argument_group("PPO")
@@ -281,6 +309,13 @@ def main(argv: list[str] | None = None) -> int:
              if cfg.warmup_init_mode else ""))
     print(f"  timing         : physics {cfg.sim_dt} s, agent {cfg.control_dt} s, "
           f"episode {cfg.max_episode_steps * cfg.control_dt:.1f} s")
+    if cfg.shaping != "none":
+        # Say it loudly: mean_return is no longer comparable with earlier runs,
+        # because the shaping term is part of the return.  The gates are all
+        # success rates, which the shaping cannot change.
+        gamma = cfg.gamma if cfg.shape_gamma is None else cfg.shape_gamma
+        print(f"  reward shaping : {cfg.shaping}, coef {cfg.shape_coef}, gamma {gamma} "
+              f"-> 'mean return' is NOT comparable with unshaped runs")
     print(f"  per iteration  : {cfg.num_envs} envs x {cfg.rollout_steps} steps = {cfg.steps_per_epoch} transitions")
     print(f"  total budget   : {cfg.max_epochs} iterations = {cfg.max_epochs * cfg.steps_per_epoch:,} env steps")
     print(f"  outputs        : {run_dir}")
