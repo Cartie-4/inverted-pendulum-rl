@@ -72,7 +72,12 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         w_omega=args.w_omega,
         w_u=args.w_u,
         terminate_on_limit=args.terminate_on_limit,
-        terminate_angle=(args.terminate_angle if args.terminate_angle > 0 else None),
+        # The CLI flag is in DEGREES, like --init-angle-limit (and like evaluate.py).
+        # EnvConfig compares this against the angle wrapped to [-pi, pi), so passing
+        # the raw value made every documented threshold (11.5 / 23.5 / 53.5 / ...) a
+        # silent no-op: 11.5 "rad" is ~659 deg and can never be exceeded.
+        terminate_angle=(float(np.radians(args.terminate_angle))
+                         if args.terminate_angle > 0 else None),
         learning_rate=args.learning_rate,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
@@ -153,8 +158,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     task.add_argument(
         "--terminate-angle",
         type=float,
-        default=0.6,
-        help="end an episode when |theta| exceeds this many radians (pole fell over); "
+        # 34.4 deg ~= the historical 0.6 rad default.  The value has to move with the
+        # unit: leaving 0.6 here would have tightened the default from ~34 deg to
+        # 0.6 deg once the flag started being converted from degrees.
+        default=34.4,
+        help="end an episode when |theta| exceeds this many DEGREES (pole fell over); "
              "0 disables. Automatically ignored for swing-up tasks (hanging starts), "
              "where the pole must be free to sweep through pi/2.",
     )

@@ -25,6 +25,15 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+# Keep the BLAS/OpenMP pools single-threaded.  The policy is a ~135k-parameter MLP on
+# a 6-dimensional state, so a parallel region here costs far more than it computes:
+# with the default pools this script was measured burning ~15 cores while a single
+# environment was paced at 50 Hz, almost entirely thread spin-waiting.  These must be
+# set before numpy/torch are imported, or the pools may already exist.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +46,33 @@ from pendulum_rl.envs.inverted_pendulum import EnvConfig, InvertedPendulumEnv  #
 from pendulum_rl.lightning_module import env_config_from_checkpoint  # noqa: E402
 from pendulum_rl.rendering import render_episode  # noqa: E402
 from pendulum_rl.utils import VIDEO_DIR, ensure_dirs  # noqa: E402
+
+
+def ending_reason(info: dict, terminated: bool, truncated: bool, wall_stop: bool = False) -> str:
+    """Name *why* an episode ended, from what the plant actually did.
+
+    The ``terminated``/``truncated`` flags alone are not enough.  With
+    ``terminate_on_limit`` off (the default, and what the balance checkpoints
+    record) a cart that runs off the rail comes back as ``truncated``, so deciding
+    on ``terminated`` first filed rail exits under ``"time cap"`` -- and "time cap"
+    is a *non*-failure.  The headline "episodes that fell" therefore hid exactly the
+    failure mode that dominates this project (handoff section 14: after P4 the cart
+    hitting the rail is the only hard failure and the most common one).  Physical
+    flags win over the flag that describes value-bootstrapping.
+    """
+    if info.get("fell_over"):
+        return "fell over"
+    if info.get("out_of_rail"):
+        return "out of rail"
+    if info.get("diverged"):
+        return "diverged"
+    if wall_stop:
+        return "wall-clock stop"
+    if truncated:
+        return "time cap"
+    if terminated:
+        return "terminated"
+    return "still standing"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -107,7 +143,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--terminate-angle",
         type=float,
         default=None,
-        help="end an episode once |theta| exceeds this many radians; 0 disables the rule. "
+        help="end an episode once |theta| exceeds this many DEGREES; 0 disables the rule. "
              "Required to be 0 (or unset with a hanging start) for swing-up.",
     )
     p.add_argument("--video", type=Path, default=None, help="output .gif/.mp4 path (default outputs/videos/<name>.gif)")
@@ -201,6 +237,13 @@ def _run_live(env, controller, env_cfg, args) -> dict:
     action_abs_all: list[float] = []
     first_episode_done = False
     t0 = time.perf_counter()
+    # Captured *before* viewer.close(): closing sets the mode to "off", and the caller
+    # uses this value to decide whether the live statistics are usable.  It is set
+    # here rather than in `finally` because a window closed by the *user* is already
+    # "off" by the time `finally` runs -- that used to look like a failed live run and
+    # sent the caller into a head-less batch with no step cap at all
+    # (--max-seconds 0 => horizon None => step_cap 1e9): a silent infinite loop.
+    mode_at_exit = viewer.mode
     try:
         while True:
             obs, _ = env.reset(seed=args.seed + episodes_shown)
@@ -258,13 +301,7 @@ def _run_live(env, controller, env_cfg, args) -> dict:
             returns.append(ep_return)
             durations.append(step * env_cfg.control_dt)
             episodes_shown += 1
-            if terminated:
-                failures.append("fell over" if info.get("fell_over") else (
-                    "out of rail" if info.get("out_of_rail") else "diverged"))
-            elif truncated:
-                failures.append("time cap")
-            else:
-                failures.append("still standing")
+            failures.append(ending_reason(info, terminated, truncated))
             first_episode_done = True
             print(f"[live-view] episode {episodes_shown}: held {durations[-1]:.1f} s "
                   f"({step} steps), return {ep_return:.1f}, ending: {failures[-1]}")
@@ -282,11 +319,10 @@ def _run_live(env, controller, env_cfg, args) -> dict:
             print(f"[live-view] stopped mid-episode after {durations[-1]:.1f} s "
                   f"({step} steps), still standing")
     finally:
-        mode_at_exit = viewer.mode
         viewer.close()
-    # NOTE: capture the mode *before* close() — closing sets it to "off", which
-    # used to make the caller think the live run had failed and fall back to the
-    # head-less batch statistics.
+    # `mode_at_exit` was captured before close() (see above): closing sets the mode to
+    # "off", which used to make the caller think the live run had failed and fall back
+    # to the head-less batch statistics.
     summary = {
         "mode": mode_at_exit,
         "episodes": episodes_shown,
@@ -422,11 +458,22 @@ def main(argv: list[str] | None = None) -> int:
         step_cap = env_cfg.max_episode_steps if env_cfg.max_episode_steps is not None else 10**9
         returns, lengths, successes, angle_rms, actions, energies = [], [], [], [], [], []
         failures: list[str] = []
+        #: Initial state of every episode as [x, theta, x_dot, theta_dot]: the env
+        #: keeps generalised coordinates in ``state`` and their rates in
+        #: ``state_dot``, so both are needed to describe the start distribution (an
+        #: upright start is at rest, a random one is not).  The seed fixes it, so two
+        #: runs with the same seeds can be compared *paired* (exact McNemar on
+        #: individual states) instead of comparing two independent proportions --
+        #: see scripts/paired_eval.py.
+        init_states: list[list[float]] = []
         first_actions: list[float] = []
         history: dict[str, list[float]] = {"theta": [], "x": [], "u": [], "reward": []}
         wall_start = time.perf_counter()
         for episode in range(args.episodes):
             obs, _ = env.reset(seed=args.seed + episode)
+            position = np.asarray(env.state, dtype=float).ravel()
+            rate = np.asarray(env.state_dot, dtype=float).ravel()
+            init_states.append([float(value) for value in (*position, *rate)])
             episode_return = 0.0
             theta_sq = []
             ep_actions = []
@@ -463,14 +510,7 @@ def main(argv: list[str] | None = None) -> int:
             angle_rms.append(float(np.sqrt(np.mean(theta_sq))))
             actions.append(float(np.mean(np.abs(ep_actions))))
             energies.append(float(np.mean([abs(a) for a in ep_actions]) / env_cfg.action_limit))
-            if terminated:
-                failures.append("fell over" if info.get("fell_over") else ("out of rail" if info.get("out_of_rail") else "diverged"))
-            elif truncated:
-                failures.append("time cap")
-            elif wall_stop:
-                failures.append("wall-clock stop")
-            else:
-                failures.append("still standing")
+            failures.append(ending_reason(info, terminated, truncated, wall_stop))
             if episode == 0:
                 first_actions = ep_actions
             if wall_stop:
@@ -483,10 +523,12 @@ def main(argv: list[str] | None = None) -> int:
     survived = [length * env_cfg.control_dt for length in lengths]
     # An episode counts as "did not fall" when it ended for a non-physical reason:
     # hitting the step/seconds budget, the wall-clock backstop, or the user
-    # stopping the run.  Everything else (fell over / out of rail / diverged) is
-    # a real failure.  A bare "not in FELL" test would wrongly count 'time cap'
+    # stopping the run.  Everything else (fell over / out of rail / diverged) is a
+    # real failure.  A bare "not in FELL" test would wrongly count 'time cap'
     # episodes as clean, which made "never fell" read 20/20 while the mean hold
-    # time showed that episodes were in fact ending early.
+    # time showed that episodes were in fact ending early.  Note that rail exits and
+    # divergence reach here as *truncated* episodes (terminate_on_limit is off), so
+    # `ending_reason` classifies on the plant's own flags rather than on that.
     NOT_A_FALL = {"time cap", "wall-clock stop", "stopped by user", "still standing"}
     still_up = sum(1 for f in failures if f in NOT_A_FALL)
     n_fell = len(failures) - still_up
@@ -500,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
         "mean_return": float(np.mean(returns)),
         "std_return": float(np.std(returns)),
         "mean_length": float(np.mean(lengths)),
+        "max_length": float(np.max(lengths)),
         "mean_survival_s": float(np.mean(survived)),
         "max_survival_s": float(np.max(survived)),
         "success_rate": float(np.mean(successes)),
@@ -548,7 +591,8 @@ def main(argv: list[str] | None = None) -> int:
               f"({env_cfg.max_episode_steps * env_cfg.control_dt:.1f} s each; "
               f"{'--max-steps' if args.max_steps is not None else '--max-seconds budget'})")
     print(f"mean hold time    : {summary['mean_survival_s']:8.2f} s   "
-          f"(longest {summary['max_survival_s']:.2f} s, {summary['mean_length']:.0f} steps)")
+          f"(longest {summary['max_survival_s']:.2f} s = {summary['max_length']:.0f} steps, "
+          f"mean {summary['mean_length']:.0f} steps)")
     ends = set(summary["failures"])
     n_fell_ep = len(summary["failures"]) - still_up
     horizon_s = (env_cfg.max_episode_steps or 0) * env_cfg.control_dt
@@ -590,6 +634,24 @@ def main(argv: list[str] | None = None) -> int:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         # drop the bulky per-step trajectory and the per-episode arrays' history
         payload = {k: v for k, v in summary.items() if k != "history"}
+        # Per-episode outcomes.  Present only for a head-less batch: in --render
+        # mode the loop above is driven by the window and `successes` collapses to
+        # a single aggregate, so there is nothing per-episode to align.
+        if not use_live_stats:
+            payload["episodes"] = [
+                {
+                    "episode": index,
+                    "seed": args.seed + index,
+                    "init_state": init_states[index] if index < len(init_states) else None,
+                    "success": bool(successes[index]),
+                    "ending": failures[index],
+                    "steps": int(lengths[index]),
+                    "return": float(returns[index]),
+                    "theta_rms_deg": float(np.degrees(angle_rms[index])),
+                    "mean_abs_action": float(actions[index]),
+                }
+                for index in range(len(lengths))
+            ]
         if live_status:
             payload["live"] = {
                 k: v for k, v in live_status.items() if k not in ("history", "returns", "durations")
