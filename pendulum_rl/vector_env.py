@@ -56,6 +56,14 @@ class SyncVectorEnv:
             self.finished_returns.append(float(info["episode_return"][i]))
             self.finished_lengths.append(int(self.plant.steps[i]))
             self.finished_success.append(bool(info["is_success"][i]))
+        # The observation handed back for a finished env is the *fresh* episode's state,
+        # which is what the next action must be chosen from.  Keep the state the episode
+        # actually ended in as well: bootstrapping a truncated transition with
+        # V(fresh start) tells the critic that running into the rail teleports the agent
+        # into a good episode, and the policy goes looking for the rail (run
+        # p5_swing_fixed degraded exactly that way: value loss 700 -> 5800, mean episode
+        # length 265 -> 50, val success 0.72 -> 0.31).
+        info["terminal_obs"] = obs.copy()
         if done.any():
             # Fresh episodes start from a newly drawn state.
             self.plant.reset(done, rngs=self.rngs)

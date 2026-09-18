@@ -329,12 +329,16 @@ class PPOLightningModule(LightningModule):
             env_actions = (clipped * self.action_limit).astype(np.float32)
             next_obs, rewards, dones = envs.step(env_actions)
             self.agent.obs_rms.update(self._obs)
-            # GAE takes the *termination* mask, not `done`: a truncated episode (rail
-            # limit, divergence, step cap) must still bootstrap, otherwise ending an
-            # episode early is a free escape from a fallen pole's -29.6/step.
+            # GAE takes the *termination* mask, not `done` (a truncated episode must keep
+            # bootstrapping), and the bootstrap value comes from the state the transition
+            # actually reached -- `terminal_obs`, the observation captured before the
+            # vector env reset the finished envs.  Using the post-reset observation would
+            # value a rail exit as "a fresh episode starts" and the policy would seek the
+            # rail.
             self.buffer.add(
                 self._obs, clipped, log_probs, values, rewards,
                 np.asarray(envs.last_info["terminated"], dtype=np.float32),
+                self.agent.value(envs.last_info["terminal_obs"]),
             )
             self._obs = next_obs
 

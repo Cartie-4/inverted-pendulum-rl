@@ -129,12 +129,15 @@ class RolloutBuffer:
         self.values = np.zeros(size, dtype=np.float32)
         self.rewards = np.zeros(size, dtype=np.float32)
         self.terminals = np.zeros(size, dtype=np.float32)
+        #: V of the state each transition actually reached, taken from the *pre-reset*
+        #: observation so a truncated episode bootstraps from the state it ended in.
+        self.next_values = np.zeros(size, dtype=np.float32)
         self.ptr = 0
 
     def __len__(self) -> int:
         return self.ptr
 
-    def add(self, obs, actions, log_probs, values, rewards, terminals) -> None:
+    def add(self, obs, actions, log_probs, values, rewards, terminals, next_values) -> None:
         n = len(obs)
         sl = slice(self.ptr, self.ptr + n)
         self.obs[sl] = obs
@@ -144,32 +147,32 @@ class RolloutBuffer:
         self.rewards[sl] = rewards
         #: True terminations only, *not* ``done`` -- see :meth:`compute_gae`.
         self.terminals[sl] = terminals
+        self.next_values[sl] = next_values
         self.ptr += n
 
-    def compute_gae(self, last_values: np.ndarray, steps: int, num_envs: int, cfg: PPOConfig) -> tuple[np.ndarray, np.ndarray]:
+    def compute_gae(self, steps: int, num_envs: int, cfg: PPOConfig) -> tuple[np.ndarray, np.ndarray]:
         """GAE(lambda) over a (steps, num_envs) time-major view of the buffer.
 
-        ``terminals[t]`` must mark *true* terminations only, i.e. the pole falling
-        past ``terminate_angle``.  Truncations -- the rail limit, divergence, the
-        step cap -- have to keep bootstrapping: zeroing the bootstrap there hands the
-        policy a free escape from the -29.6/step of a fallen pole.  That is exactly
-        how run ``p5_swing`` collapsed: with the angle threshold removed, the rail was
-        the only escape left and the policy learned to end episodes in 20 steps by
-        driving off it (mean episode length 339 -> 20, approx_kl ~30, value loss
-        ~1e6).  HANDOFF section 6 intends a rail exit to be a truncation.
+        ``terminals[t]`` marks *true* terminations only (the pole fell past
+        ``terminate_angle``); truncations -- the rail limit, divergence, the step cap --
+        must keep bootstrapping.  ``next_values[t]`` is V of the state the transition
+        actually reached, computed from the *pre-reset* observation, so a truncated
+        transition bootstraps from the state it ended in rather than from the fresh
+        episode that replaced it.  Using the post-reset observation made V(fresh start)
+        -- about +200 -- the target at a rail exit, i.e. a large reward for failing.
         """
         advantages = np.zeros_like(self.rewards)
         last_gae = np.zeros(num_envs, dtype=np.float32)
         rewards = self.rewards.reshape(steps, num_envs)
         values = self.values.reshape(steps, num_envs)
         terminals = self.terminals.reshape(steps, num_envs)
+        next_values = self.next_values.reshape(steps, num_envs)
         adv = advantages.reshape(steps, num_envs)
         for t in reversed(range(steps)):
-            next_value = last_values if t == steps - 1 else values[t + 1]
             # `terminals[t]` marks the transition t -> t+1, so bootstrap unless the
             # next state is a true terminal.
             next_non_terminal = 1.0 - terminals[t]
-            delta = rewards[t] + cfg.gamma * next_value * next_non_terminal - values[t]
+            delta = rewards[t] + cfg.gamma * next_values[t] * next_non_terminal - values[t]
             last_gae = delta + cfg.gamma * cfg.gae_lambda * next_non_terminal * last_gae
             adv[t] = last_gae
         returns = advantages + self.values
@@ -224,8 +227,7 @@ class PPOAgent:
     # ----------------------------------------------------------------- update
     def update(self, buffer: RolloutBuffer, steps: int, num_envs: int) -> dict[str, float]:
         cfg = self.cfg
-        last_values = self.value(buffer.obs[-num_envs:])
-        advantages, returns = buffer.compute_gae(last_values, steps, num_envs, cfg)
+        advantages, returns = buffer.compute_gae(steps, num_envs, cfg)
 
         obs = torch.as_tensor(self.obs_rms.normalize(buffer.obs), dtype=torch.float32, device=self.device)
         actions = torch.as_tensor(buffer.actions, dtype=torch.float32, device=self.device)

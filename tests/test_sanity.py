@@ -233,7 +233,10 @@ def test_ppo_update() -> None:
         env_action = clipped * env.cfg.action_limit
         agent.obs_rms.update(obs[None, :])
         obs, reward, terminated, truncated, _ = env.step(env_action[0])
-        buffer.add(obs[None, :] * 0, clipped, log_prob, value, [reward], [float(terminated or truncated)])
+        buffer.add(
+            obs[None, :] * 0, clipped, log_prob, value, [reward],
+            [float(terminated)], agent.value(obs[None, :]),
+        )
         if terminated or truncated:
             obs, _ = env.reset()
     stats = agent.update(buffer, 32, 1)
