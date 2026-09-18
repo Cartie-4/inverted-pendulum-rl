@@ -126,7 +126,7 @@ class BatchedPendulum:
             ).astype(np.float32)
         return np.stack(
             [
-                _scale(s.x, cfg.x_limit),
+                _scale(s.x, cfg.obs_x_scale_value),
                 _scale(s.x_dot, 10.0),
                 np.cos(theta),
                 np.sin(theta),

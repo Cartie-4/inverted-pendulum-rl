@@ -86,6 +86,14 @@ class EnvConfig:
     init_angle_range: float = 0.05   # used by init_mode="upright" [rad]
     init_pos_range: float = 0.05     # used by init_mode="upright" [m]
     x_limit: float = 2.4             # rail half length [m]
+    #: Normalisation constant for ``x`` in the observation.  ``None`` (default)
+    #: means "use ``x_limit``", the historical behaviour.  Pinning it to a fixed
+    #: value decouples the *physical* rail from the *feature space*: when a policy
+    #: is warm-started onto a longer rail, letting ``x_limit`` drive the scale
+    #: would shift an input the policy was trained on, so the warm start would be
+    #: judged on different features.  Pinned, the extra rail is simply slack the
+    #: policy has never used.
+    obs_x_scale: float | None = None
     #: Curriculum on the *initial state distribution*.  For ``init_mode="random"``
     #: the pole angle is drawn uniformly from ``[-init_angle_limit, +init_angle_limit]``
     #: (``None`` = the full circle, ``[-pi, pi]``) and the rates from
@@ -181,6 +189,7 @@ class EnvConfig:
         # A(pi) = (-1)^p + offset, so offset = 1 for odd p (A(pi) = 0) and
         # offset = 0 for even p (A(pi) = 1 - 1 = 0).
         self.a_theta_offset = float(self.a_theta_power % 2)
+        self.obs_x_scale_value = float(self.x_limit if self.obs_x_scale is None else self.obs_x_scale)
         self.shape_energy_target = 2.0 * self.m_pole * self.gravity * self.l_pole
         if self.shaping not in ("none", "energy"):
             raise ValueError(f"unknown shaping mode: {self.shaping!r}")
@@ -190,6 +199,9 @@ class EnvConfig:
     #: target pendulum energy of the shaping potential, ``E* = 2 m g l`` [J]
     #: (0 = hanging at rest, ``E*`` = upright at rest).
     shape_energy_target: float = field(default=1.0, init=False)
+
+    #: resolved ``obs_x_scale`` (``x_limit`` unless overridden), set in __post_init__
+    obs_x_scale_value: float = field(default=2.4, init=False)
 
     #: normalisation constant of the upright reward term (set in __post_init__)
     a_theta_offset: float = field(default=1.0, init=False)
@@ -430,7 +442,7 @@ class InvertedPendulumEnv(gym.Env):
             obs = [np.cos(theta), np.sin(theta), _scale(theta_dot, 8.0), _scale(theta, np.pi)]
         else:
             obs = [
-                _scale(x, cfg.x_limit),
+                _scale(x, cfg.obs_x_scale_value),
                 _scale(x_dot, 10.0),
                 np.cos(theta),
                 np.sin(theta),

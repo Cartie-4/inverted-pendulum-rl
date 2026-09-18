@@ -67,6 +67,8 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         warmup_init_mode=args.warmup_init_mode,
         curriculum_fraction=args.curriculum_fraction,
         max_episode_steps=args.max_episode_steps,
+        x_limit=args.x_limit,
+        obs_x_scale=args.obs_x_scale,
         max_force=args.max_force,
         max_torque=args.max_torque,
         action_mode=args.action_mode,
@@ -170,6 +172,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "the gradient.",
     )
     task.add_argument("--max-episode-steps", type=int, default=500, help="10 s at 50 Hz")
+    task.add_argument(
+        "--x-limit",
+        type=float,
+        default=2.4,
+        help="rail half-length in metres.  The cart fails the episode past +-x_limit; this is a "
+             "physics parameter, so changing it changes the task (see RESULTS.md 5.5 for what "
+             "the 2.4 m rail costs the 60..90 deg band).",
+    )
+    task.add_argument(
+        "--obs-x-scale",
+        type=float,
+        default=None,
+        help="normalisation constant for x in the observation; default follows --x-limit.  Pin it "
+             "to a previous run's rail when warm-starting onto a longer one, otherwise the "
+             "policy's own input is rescaled and the warm start is judged on shifted features.",
+    )
     task.add_argument("--control-dt", type=float, default=0.02, help="agent decision period [s]")
     task.add_argument("--sim-dt", type=float, default=0.002, help="RK4 physics step [s]")
     task.add_argument("--action-mode", choices=["force", "acceleration"], default="force")

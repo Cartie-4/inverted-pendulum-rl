@@ -391,6 +391,46 @@ def test_rate_curriculum_is_actually_slower() -> None:
     )
 
 
+def test_obs_x_scale_decouples_rail_from_features() -> None:
+    """Lengthening the rail must not silently rescale the policy's input.
+
+    ``x`` enters the observation as ``x / obs_x_scale``.  When the scale follows
+    ``x_limit`` (the historical behaviour), a longer rail compresses every x the
+    policy sees, so a warm start onto a longer rail would be judged on shifted
+    features.  Pinning the scale keeps the feature space fixed and leaves the
+    extra rail as unused slack.
+    """
+    pin = 2.4
+    short = EnvConfig(model="cart", init_mode="upright", x_limit=2.4)
+    # default: the observation scale follows the rail
+    check(
+        "obs_x_scale defaults to x_limit",
+        short.obs_x_scale_value == 2.4
+        and replace(short, x_limit=3.4).obs_x_scale_value == 3.4,
+        f"2.4 m rail -> {short.obs_x_scale_value}, 3.4 m rail -> "
+        f"{replace(short, x_limit=3.4).obs_x_scale_value}",
+    )
+
+    # pinned: the same physical state must produce the same observation
+    long_rail = EnvConfig(model="cart", init_mode="upright", x_limit=3.4, obs_x_scale=pin)
+    x = 1.8
+    a = InvertedPendulumEnv(short)
+    b = InvertedPendulumEnv(long_rail)
+    for env in (a, b):
+        env.reset(seed=0)
+        env.state[0] = x
+        env.state[1] = 0.3
+        env.state_dot[0] = 0.25
+        env.state_dot[1] = -0.4
+    obs_a, obs_b = a._obs(), b._obs()
+    check(
+        "pinned obs_x_scale gives the same observation on a longer rail",
+        bool(np.allclose(obs_a, obs_b)) and abs(obs_a[0] - np.clip(x / pin, -1, 1)) < 1e-12,
+        f"max |obs diff| = {float(np.max(np.abs(obs_a - obs_b))):.2e}, "
+        f"obs[0] = {obs_a[0]:+.4f} (x/scale = {x / pin:+.4f})",
+    )
+
+
 def test_batched_matches_scalar() -> None:
     """The vectorised plant must reproduce the scalar reference exactly."""
     rng = np.random.default_rng(0)
@@ -680,6 +720,7 @@ def main() -> int:
         test_energy_shaping_is_potential_based,
         test_curriculum_switches_both_env_sets,
         test_rate_curriculum_is_actually_slower,
+        test_obs_x_scale_decouples_rail_from_features,
         test_sync_vector_env,
         test_terminate_angle,
         test_ppo_update,

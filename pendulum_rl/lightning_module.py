@@ -82,6 +82,11 @@ class TrainConfig:
     #: "commit to the fall" decision in the gradient.  See init_rate_limit_at.
     warmup_init_rate_limit: float | None = None
     max_episode_steps: int | None = 500
+    #: Physical rail half-length [m].  See EnvConfig.x_limit.
+    x_limit: float = 2.4
+    #: Normalisation constant for x in the observation; None = follow x_limit.
+    #: Pin it when warm-starting a longer rail so the feature space does not move.
+    obs_x_scale: float | None = None
     max_force: float = 50.0
     max_torque: float = 2.5
     action_mode: str = "force"
@@ -153,6 +158,8 @@ class TrainConfig:
             init_angle_limit=self.init_angle_limit,
             init_rate_limit=self.init_rate_limit,
             init_angle_center=self.init_angle_center,
+            x_limit=self.x_limit,
+            obs_x_scale=self.obs_x_scale,
             max_episode_steps=self.val_max_episode_steps if for_eval else self.max_episode_steps,
             max_force=self.max_force,
             max_torque=self.max_torque,
