@@ -62,6 +62,11 @@ class SyncVectorEnv:
         self.cfg.init_mode = mode  # type: ignore[assignment]
         self.plant.cfg.init_mode = mode  # type: ignore[assignment]
 
+    def set_init_rate_limit(self, rate: float) -> None:
+        """Switch the initial |theta_dot| / |x_dot| bound (see set_init_mode)."""
+        self.cfg.init_rate_limit = float(rate)
+        self.plant.cfg.init_rate_limit = float(rate)
+
     # ------------------------------------------------------------------- step
     def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         obs, rewards, done, info = self.plant.step(actions)

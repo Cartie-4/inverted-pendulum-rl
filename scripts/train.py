@@ -63,6 +63,7 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         # --init-angle-limit of 15 with the default centre samples +-15 deg, not
         # the 60..90 deg window the flag was meant to describe.
         init_angle_center=float(np.radians(args.init_angle_center)),
+        warmup_init_rate_limit=args.warmup_init_rate_limit,
         warmup_init_mode=args.warmup_init_mode,
         curriculum_fraction=args.curriculum_fraction,
         max_episode_steps=args.max_episode_steps,
@@ -156,6 +157,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "+-15 deg.  Use e.g. --init-angle-center 75 --init-angle-limit 15 to train on "
              "exactly the 60..90 deg band; this is the same convention (and flag name) as "
              "evaluate.py.  Ignored for the upright/hanging start modes.",
+    )
+    task.add_argument(
+        "--warmup-init-rate-limit",
+        type=float,
+        default=None,
+        help="gentler initial rate bound for the --curriculum-fraction warm-up window, then "
+             "ramp to --init-rate-limit.  The angle band and the starting rates are separate "
+             "difficulties: from ~75 deg at rest the pole must be let go to gain any energy, "
+             "while a random +-0.5 rad/s start lets the policy keep fighting for an "
+             "unreachable catch.  Starting slow keeps the 'commit to the fall' decision in "
+             "the gradient.",
     )
     task.add_argument("--max-episode-steps", type=int, default=500, help="10 s at 50 Hz")
     task.add_argument("--control-dt", type=float, default=0.02, help="agent decision period [s]")

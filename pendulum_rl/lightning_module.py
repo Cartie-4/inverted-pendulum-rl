@@ -73,6 +73,14 @@ class TrainConfig:
     init_angle_limit: float | None = None
     init_rate_limit: float | None = None
     init_angle_center: float = 0.0
+    #: Optional gentler initial |theta_dot|, |x_dot| for the warm-up window.  The
+    #: angle band and the starting rates are two different difficulties and the
+    #: band alone does not make the interesting behaviour visible: from 75 deg at
+    #: rest the pole must be *let go* to gain any energy at all, whereas a random
+    #: +-0.5 rad/s initial rate lets the policy get away with fighting for the
+    #: catch most of the time.  Starting slow and ramping the rate up keeps the
+    #: "commit to the fall" decision in the gradient.  See init_rate_limit_at.
+    warmup_init_rate_limit: float | None = None
     max_episode_steps: int | None = 500
     max_force: float = 50.0
     max_torque: float = 2.5
@@ -183,6 +191,17 @@ class TrainConfig:
         if self.warmup_init_mode and progress < self.curriculum_fraction:
             return self.warmup_init_mode
         return self.init_mode
+
+    def init_rate_limit_at(self, progress: float) -> float | None:
+        """Initial |theta_dot| / |x_dot| bound for this point in the run.
+
+        Shares the warm-up window with :meth:`init_mode_at`, so a single
+        ``--curriculum-fraction`` describes both ramps and the two cannot drift
+        apart.  ``None`` means "keep whatever the env config has".
+        """
+        if self.warmup_init_rate_limit is not None and progress < self.curriculum_fraction:
+            return float(self.warmup_init_rate_limit)
+        return self.init_rate_limit
 
     def ppo_config(self, obs_dim: int, action_dim: int) -> PPOConfig:
         return PPOConfig(
@@ -332,8 +351,11 @@ class PPOLightningModule(LightningModule):
         # policy was actually being trained on the post-switch distribution.  A
         # run could then finish with a best checkpoint chosen by a task it is no
         # longer being asked to solve.
-        self.dm.train_envs.set_init_mode(mode)
-        self.dm.val_envs.set_init_mode(mode)
+        rate = self.cfg.init_rate_limit_at(progress)
+        for envs in (self.dm.train_envs, self.dm.val_envs):
+            envs.set_init_mode(mode)
+            if rate is not None:
+                envs.set_init_rate_limit(rate)
 
     # ------------------------------------------------------------ train step
     def training_step(self, batch, batch_idx):  # noqa: ARG002 - batch is a placeholder

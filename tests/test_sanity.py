@@ -330,6 +330,67 @@ def test_curriculum_switches_both_env_sets() -> None:
     )
 
 
+def test_rate_curriculum_is_actually_slower() -> None:
+    """The warm-up rate bound must reach the sampled states, not just the config.
+
+    The angle band and the starting rates are separate difficulties, and a
+    curriculum that only edits a config field without the plant noticing is
+    exactly the failure mode the previous test guards for the init mode.  Here
+    the assertion is on the *sampled* |theta_dot|, which is what the policy sees.
+    """
+    from pendulum_rl.lightning_module import PPOLightningModule, RolloutDataModule, TrainConfig
+
+    cfg = TrainConfig(
+        init_mode="random",
+        init_angle_center=float(np.radians(75.0)),
+        init_angle_limit=float(np.radians(15.0)),
+        init_rate_limit=0.2,
+        warmup_init_rate_limit=0.05,
+        terminate_angle=None,
+        curriculum_fraction=0.5,
+        max_epochs=10,
+        num_envs=8,
+        val_num_envs=8,
+        rollout_steps=8,
+        shaping="energy",
+    )
+    dm = RolloutDataModule(
+        [cfg.env_config() for _ in range(cfg.num_envs)],
+        [cfg.env_config(for_eval=True) for _ in range(cfg.val_num_envs)],
+        cfg.rollout_steps,
+        seed=0,
+    )
+    module = PPOLightningModule(cfg, dm)
+
+    class _StubTrainer:
+        current_epoch = 0
+
+    module.trainer = _StubTrainer()  # type: ignore[assignment]
+
+    samples = {}
+    for epoch, tag in ((0, "warm"), (8, "main")):
+        module.trainer.current_epoch = epoch
+        module.on_train_epoch_start()
+        dm.train_envs.reset()
+        dm.val_envs.reset()
+        samples[tag] = (
+            float(np.abs(dm.train_envs.plant.state.theta_dot).max()),
+            float(np.abs(dm.val_envs.plant.state.theta_dot).max()),
+            float(np.degrees(np.abs(dm.train_envs.plant.state.theta).min())),
+        )
+
+    warm_train, warm_val, warm_angle = samples["warm"]
+    main_train, main_val, _ = samples["main"]
+    check(
+        "rate curriculum samples slower starts during warm-up",
+        warm_train <= 0.05 + 1e-6 and warm_val <= 0.05 + 1e-6
+        and main_train > warm_train and main_val <= 0.2 + 1e-6
+        and warm_angle >= 60.0,
+        f"train |theta_dot0| {warm_train:.4f} -> {main_train:.4f}, "
+        f"val {warm_val:.4f} -> {main_val:.4f}, warm-up min angle {warm_angle:.1f} deg",
+    )
+
+
 def test_batched_matches_scalar() -> None:
     """The vectorised plant must reproduce the scalar reference exactly."""
     rng = np.random.default_rng(0)
@@ -618,6 +679,7 @@ def main() -> int:
         test_batched_matches_scalar,
         test_energy_shaping_is_potential_based,
         test_curriculum_switches_both_env_sets,
+        test_rate_curriculum_is_actually_slower,
         test_sync_vector_env,
         test_terminate_angle,
         test_ppo_update,
