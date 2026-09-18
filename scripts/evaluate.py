@@ -136,6 +136,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "flash past before they can be seen.",
     )
     p.add_argument(
+        "--shaping",
+        choices=["none", "energy"],
+        default=None,
+        help="override the reward shaping inherited from the checkpoint.  Only 'mean return' "
+             "depends on this; success rate, hold time and failure classes do not, which is why "
+             "the acceptance gates are stated in those terms.  Default: whatever the checkpoint "
+             "recorded.",
+    )
+    p.add_argument(
+        "--shaping-coef",
+        type=float,
+        default=1.0,
+        help="coefficient of the energy shaping potential, with --shaping energy",
+    )
+    p.add_argument(
         "--wall-timeout",
         type=float,
         default=900.0,
@@ -438,6 +453,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.init_rate_limit is not None:
         env_cfg = replace(env_cfg, init_rate_limit=args.init_rate_limit)
+    # Reward shaping is normally inherited from the checkpoint (a shaped policy is
+    # reported with the return it was trained on), but it can be forced either way.
+    # Success rate, hold time and failure classes are reward-independent, so the
+    # gates stay comparable no matter which arm is being reported.
+    if args.shaping is not None:
+        env_cfg = replace(env_cfg, shaping=args.shaping, shape_coef=args.shaping_coef)
     if init_mode == "hanging" and env_cfg.terminate_angle is not None:
         print("[warn] hanging start with a terminate angle: the episode ends as soon as the "
               "pole leaves the upright window, so swing-up cannot be observed "
