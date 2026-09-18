@@ -136,6 +136,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "flash past before they can be seen.",
     )
     p.add_argument(
+        "--x-limit",
+        type=float,
+        default=None,
+        help="override the rail half-length [m] from the checkpoint.  This changes the TASK, not "
+             "just the display: the cart fails the episode past +-x_limit.  Lengthening it is how "
+             "the 60..90 deg band becomes reachable at all (RESULTS.md 5.5.7).",
+    )
+    p.add_argument(
+        "--obs-x-scale",
+        type=float,
+        default=None,
+        help="normalisation constant for x in the observation; default follows --x-limit, which is "
+             "what the checkpoint was trained with.  Pin it to the training rail when evaluating a "
+             "policy on a longer rail, otherwise its own input is rescaled.",
+    )
+    p.add_argument(
         "--shaping",
         choices=["none", "energy"],
         default=None,
@@ -459,6 +475,11 @@ def main(argv: list[str] | None = None) -> int:
     # gates stay comparable no matter which arm is being reported.
     if args.shaping is not None:
         env_cfg = replace(env_cfg, shaping=args.shaping, shape_coef=args.shaping_coef)
+    # Rail geometry: a task parameter (where the cart fails), not a rendering knob.
+    if args.x_limit is not None:
+        env_cfg = replace(env_cfg, x_limit=float(args.x_limit))
+    if args.obs_x_scale is not None:
+        env_cfg = replace(env_cfg, obs_x_scale=float(args.obs_x_scale))
     if init_mode == "hanging" and env_cfg.terminate_angle is not None:
         print("[warn] hanging start with a terminate angle: the episode ends as soon as the "
               "pole leaves the upright window, so swing-up cannot be observed "
