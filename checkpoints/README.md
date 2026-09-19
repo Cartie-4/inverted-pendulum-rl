@@ -15,6 +15,7 @@
 | **`p5_swing_fixed_best.ckpt`** | `p5_swing_fixed` | **P5：当前最强平衡器**（无角度终止） | 竖直/**±15°/±45° = 100/100/99.5%**、±90° 62%、±180° 31.5% | `15176C47CA878B9B` |
 | `s1_shape_best.ckpt` | `s1_shape` | S1：hanging 起始 + 能量塑形（第 259 迭代） | ±180° **46%**；(135°,180°] 带 36.7% | `78013ECD79A428C7` |
 | **`s2_full_best.ckpt`** | `s2_full` | **S2：全角度 + 能量塑形**（第 164 迭代） | **(135°,180°] 95%**、(90°,135°] 31.7%、(0°,45°] 100% | `09CF8BEC874FB779` |
+| **`s8_scratch34_best.ckpt`** | `s8_scratch34b` | **S8：从零训练、3.4 m 导轨**（第 389 迭代） | ±3.4 m 下 **(75°,90°] 54.7%**（史上首次非零）、(90°,135°] 91.3%、加权 77.4% | `29D9502D46EB8A61` |
 | `s2_full_last.ckpt` | `s2_full` | S2 末期权重（第 299 迭代，val 0.47–0.72 波动） | 未单独做阶梯评估，保留作对照 | `5F19BBCDFC308370` |
 
 完整 SHA256：
@@ -27,6 +28,7 @@
 15176C47CA878B9BB3BA8FBC377FF7ADB8836260865B1182D71DBBD70FA70EED  p5_swing_fixed_best.ckpt
 78013ECD79A428C78A521FF15C5944625D76B1BDCE5B258FD9F79440E46D6B16  s1_shape_best.ckpt
 09CF8BEC874FB7797E67B9CB76BD8F43C16364A76F51DC8CA8A3DCE6005F60B8  s2_full_best.ckpt
+29D9502D46EB8A619E6CAFA9CD9910AC1D091784D832EE8371A843CFAAB04FFD  s8_scratch34_best.ckpt
 5F19BBCDFC30837088A5834F9B454794CEC6876F5B9A076A1BD5F03FF0919B0E  s2_full_last.ckpt
 ```
 
@@ -61,6 +63,9 @@ python scripts\train.py --init-from checkpoints\s2_full_best.ckpt --init-mode ra
 |---|---|---|
 | `s3_band` | 60–90° 窄带集中训练 255 迭代，成功率始终 0 | 其它带未退化，但目标带也没涨 |
 | `s4_a1_slow` / `s4_a2_wide` | 速率课程同样 0，且**毁掉了已有能力** | (135°,180°] 100% → **0%**，(90°,135°] 31.7% → 0% |
+| `s5_rail34` | 3.4 m 导轨上按 (45°,90°]∪(135°,180°] 训练 | (90°,135°] 与 (135°,180°] 双双 → **0%**（给 6 m 也救不回来） |
+| `s6_full34` | S2 warm-start + 全角度 + 3.4 m | (135°,180°] 100% → **58.3%**（门控 ≤85% 未通过） |
+| `s7_scratch34` | 从零 + 3.4 m，默认 lr | 第 114 迭代后训练崩溃，崩前 best 全面落后 |
 
 把它们放进版本控制会把"更差的权重"当成里程碑；要复现判读用 `RESULTS.md` 里的配方即可。
 `s4_a1_slow/best.ckpt` 仍在 `outputs/checkpoints/` 里，未删除，只是不外发。
