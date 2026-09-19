@@ -84,7 +84,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--render", action="store_true",
                    help="live window on the real plant instead of the head-less band sweep")
     p.add_argument("--out", type=Path, default=None, help="write the report as JSON")
-    return p.parse_args(argv)
+    # Window options, forwarded verbatim to evaluate.py so the live rule is seen
+    # under exactly the settings the head-less sweep used.
+    p.add_argument("--max-seconds", type=float, default=None,
+                   help="with --render: hard cap per episode in real seconds (0 = no cap)")
+    p.add_argument("--episode-pause", type=float, default=None,
+                   help="with --render: seconds to dwell on the frozen last frame between episodes")
+    p.add_argument("--no-video", action="store_true", help="with --render: skip the GIF")
+    p.add_argument("--no-plot", action="store_true", help="with --render: skip the trajectory plot")
+    p.add_argument("--stop-on-failure", action="store_true",
+                   help="with --render: end the loop at the first physical failure")
+    args, extra = p.parse_known_args(argv)
+    args.extra = list(extra or [])
+    return args
 
 
 def load_policy_checkpoint(path: Path, device: str):
@@ -94,7 +106,14 @@ def load_policy_checkpoint(path: Path, device: str):
     return raw
 
 
-def make_env(raw: dict, lo: float, hi: float, args: argparse.Namespace):
+def make_env(raw: dict, lo: float, hi: float, args: argparse.Namespace, rate_limit: float | None = None):
+    """Build one evaluation env for the band (lo, hi].
+
+    ``rate_limit`` is passed explicitly rather than read off ``args``: the live
+    path hands this function an ``evaluate``-shaped namespace (whose field is
+    called ``init_rate_limit``) while the sweep path has this script's own
+    ``rate_limit``, and relying on the attribute name silently breaks one of them.
+    """
     from pendulum_rl.envs.inverted_pendulum import InvertedPendulumEnv
     from pendulum_rl.lightning_module import env_config_from_checkpoint
 
@@ -103,7 +122,7 @@ def make_env(raw: dict, lo: float, hi: float, args: argparse.Namespace):
         init_mode="random",
         init_angle_center=float(np.radians(0.5 * (lo + hi))),
         init_angle_limit=float(np.radians(0.5 * (hi - lo))),
-        init_rate_limit=float(args.rate_limit),
+        init_rate_limit=float(args.rate_limit if rate_limit is None else rate_limit),
         terminate_angle=None,
         max_episode_steps=500,
         x_limit=float(args.x_limit),
@@ -135,18 +154,45 @@ def rollout(env, controller, seed: int) -> tuple[bool, float]:
 
 
 def run_live(args: argparse.Namespace) -> int:
-    """Real-time window, switching per episode exactly as the sweep does."""
+    """Real-time window, switching per episode exactly as the sweep does.
+
+    ``evaluate._run_live`` needs an ``evaluate``-shaped namespace (it reads
+    render_seconds, episode_pause, fps, stop_on_failure, seed, ...), so build one
+    from this script's window options instead of hand-rolling the attributes --
+    that is how the first version of this function ended up missing them.
+    """
     from pendulum_rl.utils import ensure_dirs
 
-    env = make_env(load_policy_checkpoint(args.checkpoint, args.device), 0.0, args.bands[-1], args)
-    args.init_angle_limit = args.bands[-1]
-    args.init_angle_center = 0.0
+    argv = [
+        "--checkpoint", str(args.checkpoint),
+        "--init-mode", "random",
+        "--init-angle-limit", str(args.bands[-1]),
+        "--init-rate-limit", str(args.rate_limit),
+        "--terminate-angle", "0",
+        "--render",
+        "--x-limit", str(args.x_limit),
+        "--obs-x-scale", str(args.obs_x_scale),
+    ]
+    if args.max_seconds is not None:
+        argv += ["--max-seconds", str(args.max_seconds)]
+    if args.episode_pause is not None:
+        argv += ["--episode-pause", str(args.episode_pause)]
+    if args.no_video:
+        argv.append("--no-video")
+    if args.no_plot:
+        argv.append("--no-plot")
+    if args.stop_on_failure:
+        argv.append("--stop-on-failure")
+    live_args = evaluate.parse_args(argv + args.extra)
+
+    env = make_env(load_policy_checkpoint(args.checkpoint, args.device), 0.0, args.bands[-1],
+                   live_args, rate_limit=args.rate_limit)
     ctrls = {"main": make_controller(args.checkpoint, env, args.device)}
     if args.middle is not None:
         ctrls["middle"] = make_controller(args.middle, env, args.device)
 
     ensure_dirs()
-    summary = evaluate._run_live(env, _SwitchingController(ctrls, args), env.cfg, args)
+    summary = evaluate._run_live(env, _SwitchingController(ctrls, args), env.cfg, live_args)
     print("summary: %s" % json.dumps({k: v for k, v in summary.items() if k != "history"}, indent=2, default=str))
     return 0
 
@@ -165,6 +211,22 @@ class _SwitchingController:
         self.args = args
         self.active = ctrls["main"]
         self._last_step = -1
+        # Which calling convention does the arm use?  evaluate.py's live loop
+        # calls ``controller(env, obs)``; its head-less rollouts and this script's
+        # sweep call ``controller(env)``.  Probe once here instead of wrapping
+        # every call in try/except, which would swallow real TypeErrors from
+        # inside the policy.
+        import inspect
+
+        first = next(iter(ctrls.values()))
+        try:
+            takes_obs = len(inspect.signature(first).parameters) >= 2
+        except (TypeError, ValueError):  # builtins / C callables: assume (env,)
+            takes_obs = False
+        self._takes_obs = takes_obs
+
+    def _call(self, ctrl, env, obs=None):
+        return ctrl(env, obs) if self._takes_obs else ctrl(env)
 
     def __call__(self, env, obs=None):
         step = int(env._steps)
@@ -175,7 +237,7 @@ class _SwitchingController:
             else:
                 self.active = self.ctrls["main"]
         self._last_step = step
-        return self.active(env)
+        return self._call(self.active, env, obs)
 
 
 def main(argv: list[str] | None = None) -> int:
