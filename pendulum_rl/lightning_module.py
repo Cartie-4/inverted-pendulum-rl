@@ -144,6 +144,9 @@ class TrainConfig:
     render: bool = False
     render_fps: float = 50.0
     render_env: int = 0
+    #: live-view camera: "fixed" pins the view to the rail (the cart moves),
+    #: "follow" keeps the cart centred (the rail slides).  See LiveViewer.
+    camera: str = "fixed"
 
     #: derived, filled by :meth:`ppo_config` / :meth:`env_config`
     steps_per_epoch: int = field(init=False, default=0)
@@ -336,6 +339,7 @@ class PPOLightningModule(LightningModule):
                 fps=cfg.render_fps,
                 title=f"inverted pendulum — {cfg.run_name} ({cfg.model}, init={cfg.init_mode})",
                 snapshot_path=(OUTPUT_DIR / "live" / f"{cfg.run_name}.png"),
+                camera=getattr(cfg, "camera", "fixed"),
             )
         self._view_ep_return = 0.0
         self._view_episode = 0

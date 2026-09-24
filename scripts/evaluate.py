@@ -152,6 +152,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "policy on a longer rail, otherwise its own input is rescaled.",
     )
     p.add_argument(
+        "--camera",
+        choices=["fixed", "follow"],
+        default="fixed",
+        help="live-view camera.  'fixed' (default) pins the view to the rail so the cart visibly "
+             "moves along it and the rail limits stay on screen; 'follow' keeps the cart centred "
+             "and slides the rail underneath (the old behaviour, useful on a very long rail).",
+    )
+    p.add_argument(
         "--shaping",
         choices=["none", "energy"],
         default=None,
@@ -265,12 +273,16 @@ def _run_live(env, controller, env_cfg, args) -> dict:
         fps=min(args.fps, 60),
         title=f"inverted pendulum — {args.baseline or args.checkpoint.name if args.checkpoint else 'baseline'}",
         snapshot_path=None,
+        camera=args.camera,
     )
     if viewer.mode == "off":
         print("live view unavailable (no display); falling back to a recorded video")
         return {"mode": "off"}
 
     print(f"[live-view] showing a real-time window ({env_cfg.control_dt * 1000:.0f} ms per step).")
+    if viewer.mode == "window" and viewer.controls_enabled:
+        print("            buttons: Next episode | Replay episode | Speed | Quit")
+        print(f"            camera: {args.camera} (rail +-{env_cfg.x_limit:.1f} m)")
     if env_cfg.max_episode_steps is None:
         print("            no time limit: the episode runs until the pole actually falls.")
     else:
@@ -345,26 +357,43 @@ def _run_live(env, controller, env_cfg, args) -> dict:
                     )
                 if viewer.mode == "off":  # window closed by the user
                     raise KeyboardInterrupt
+                # Window buttons: both end the current episode, but "replay" asks
+                # for the same start state again.  Handled between steps (never
+                # inside a Tk callback) so the physics stays on this thread.
+                replay_requested = False
+                skipped = False
+                if viewer.take_skip():
+                    skipped = True
+                    break
+                if viewer.take_replay():
+                    replay_requested = True
+                    break
                 # --render-seconds is a wall-clock stop, checked *inside* the step
                 # loop: a good policy never ends an episode on its own, so testing
                 # it only between episodes would never fire.
                 if args.render_seconds and time.perf_counter() - t0 >= args.render_seconds:
                     raise KeyboardInterrupt
-                # pace to real time
-                slack = env_cfg.control_dt - (time.perf_counter() - loop_start)
+                # pace to real time (the Speed button divides the step period)
+                slack = env_cfg.control_dt / max(1e-3, viewer.speed) - (time.perf_counter() - loop_start)
                 if slack > 0:
                     time.sleep(slack)
                 if (terminated or truncated) and args.stop_on_failure:
                     break
+            if replay_requested:
+                # Same seed, same start state, nothing recorded: the user wants to
+                # watch this episode again, not to score it twice.
+                print(f"[live-view] replaying episode {episodes_shown + 1} from the same start state")
+                continue
             returns.append(ep_return)
             durations.append(step * env_cfg.control_dt)
             episodes_shown += 1
-            failures.append(ending_reason(info, terminated, truncated))
+            failures.append("skipped by user" if skipped else ending_reason(info, terminated, truncated))
             successes.append(bool(info.get("is_success", False)) or max_streak >= env_cfg.success_steps)
             first_episode_done = True
             print(f"[live-view] episode {episodes_shown}: held {durations[-1]:.1f} s "
                   f"({step} steps), return {ep_return:.1f}, ending: {failures[-1]}")
-            if args.episode_pause > 0:
+            viewer.note_episode(episodes_shown)
+            if args.episode_pause > 0 and not skipped:
                 viewer.draw_status(
                     f"episode {episodes_shown}: held {durations[-1]:.1f} s - {failures[-1]}",
                     f"next episode in {args.episode_pause:.1f} s",

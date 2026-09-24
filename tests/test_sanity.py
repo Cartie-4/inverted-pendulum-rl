@@ -637,6 +637,78 @@ def test_energy_shaping_is_potential_based() -> None:
         )
 
 
+def test_live_view_camera_and_controls() -> None:
+    """The live window: fixed camera by default, and a polled button API.
+
+    Both halves matter for the evaluation window.  With a *fixed* camera the rail
+    and its tick marks must stay put while the cart moves along them -- the old
+    follow camera centred the cart and slid the rail underneath, which also
+    pushed the rail limits (where the failures happen) off screen on a 3.4 m
+    rail.  The button API is polled by the driving loop, so it has to be
+    edge-triggered: one click must yield exactly one skip, not a skip on every
+    later step.
+    """
+    from pendulum_rl.live_view import DEFAULT_SPEED, SPEEDS, LiveViewer, compute_camera, world_to_px
+
+    cfg = EnvConfig(model="cart", x_limit=3.4)
+    width = 640
+    xs = (0.0, 1.5, -2.6)
+
+    # --- camera: fixed keeps the world still, the cart moving ---------------
+    cams = [compute_camera(x, cfg, "fixed") for x in xs]
+    rail_px = [world_to_px(1.0, cam, width) for cam in cams]      # one fixed world point
+    cart_px = [world_to_px(x, cam, width) for x, cam in zip(xs, cams)]
+    check(
+        "fixed camera: rail stays put, cart moves",
+        len(set(round(p, 6) for p in rail_px)) == 1
+        and abs(cart_px[0] - width / 2) < 1e-9
+        and cart_px[1] > cart_px[0] > cart_px[2],
+        f"rail px {rail_px[0]:.1f} (constant), cart px {[round(p) for p in cart_px]}",
+    )
+    half = compute_camera(0.0, cfg, "fixed").half_window
+    check(
+        "fixed camera shows the whole rail",
+        half >= cfg.x_limit,
+        f"half window {half:.2f} m vs rail +-{cfg.x_limit:.1f} m",
+    )
+
+    # --- camera: follow keeps the cart centred ------------------------------
+    cams = [compute_camera(x, cfg, "follow") for x in xs]
+    cart_px = [world_to_px(x, cam, width) for x, cam in zip(xs, cams)]
+    check(
+        "follow camera: cart stays centred",
+        all(abs(p - width / 2) < 1e-9 for p in cart_px),
+        f"cart px {[round(p) for p in cart_px]}",
+    )
+
+    # --- button API: edge-triggered, mutually exclusive, speed on the ladder -
+    viewer = LiveViewer(cfg, prefer_window=False)   # never opens a window
+    check(
+        "live viewer without a display falls back instead of failing",
+        viewer.mode in ("off", "png"),
+        f"mode={viewer.mode}",
+    )
+    viewer._on_next()
+    skip_once, skip_again = viewer.take_skip(), viewer.take_skip()
+    viewer._on_replay()
+    replay_once, replay_again = viewer.take_replay(), viewer.take_replay()
+    viewer._on_replay()
+    viewer._on_next()                                # "next" cancels a pending "replay"
+    replay_after_next = viewer.take_replay()
+    speeds = [viewer.speed]
+    for _ in range(len(SPEEDS) + 2):
+        viewer._on_speed()
+        speeds.append(viewer.speed)
+    check(
+        "window buttons are edge-triggered and mutually exclusive",
+        skip_once and not skip_again and replay_once and not replay_again
+        and not replay_after_next and viewer.speed in SPEEDS and speeds[0] == DEFAULT_SPEED,
+        f"skip once={skip_once}/{skip_again}, replay once={replay_once}/{replay_again}, "
+        f"replay-after-next={replay_after_next}, speed cycle {speeds[0]}->{speeds[1]}->{speeds[2]}",
+    )
+    viewer.close()
+
+
 def test_sync_vector_env() -> None:
     """The vector env must run episodes, reset them and report successes."""
     from pendulum_rl.vector_env import SyncVectorEnv
@@ -721,6 +793,7 @@ def main() -> int:
         test_curriculum_switches_both_env_sets,
         test_rate_curriculum_is_actually_slower,
         test_obs_x_scale_decouples_rail_from_features,
+        test_live_view_camera_and_controls,
         test_sync_vector_env,
         test_terminate_angle,
         test_ppo_update,

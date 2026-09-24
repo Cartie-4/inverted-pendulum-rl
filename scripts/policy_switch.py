@@ -81,6 +81,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="observation normalisation for x; pinned to the rail the policies were trained on")
     p.add_argument("--rate-limit", type=float, default=0.5, help="initial |theta_dot|, |x_dot| bound")
     p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--camera", choices=["fixed", "follow"], default="fixed",
+                   help="with --render: fixed pins the view to the rail, follow centres the cart")
     p.add_argument("--render", action="store_true",
                    help="live window on the real plant instead of the head-less band sweep")
     p.add_argument("--out", type=Path, default=None, help="write the report as JSON")
@@ -172,6 +174,7 @@ def run_live(args: argparse.Namespace) -> int:
         "--render",
         "--x-limit", str(args.x_limit),
         "--obs-x-scale", str(args.obs_x_scale),
+        "--camera", args.camera,
     ]
     if args.max_seconds is not None:
         argv += ["--max-seconds", str(args.max_seconds)]

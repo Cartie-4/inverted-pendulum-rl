@@ -247,13 +247,28 @@ PPO 更新与验证阶段也会持续刷新并显示当前阶段（`PPO update (
 
 窗口中显示：
 
-* 倒立摆本体（小车、杆、竖直参考虚线、导轨 0.5 m 刻度、±x_limit 红标），**镜头跟随小车**，
-  漂移量由刻度体现（否则稳定但漂移的小车会走出画面）
-* 顶部：PPO 迭代数、累计环境步数、回合号、rollout 进度条
-* 中间：`BALANCED` 提示（|θ| 进入成功阈值时亮起）
-* 底部：θ / x / u（含占限幅百分比）、单步回报、**本环境近 100 步 |θ| 滑动平均**、
-  全部并行环境的瞬时均值、成功率、控制量条形图
+* 倒立摆本体（小车、杆、竖直参考虚线、导轨 0.5 m 刻度、±x_limit 红标），**默认固定视角**：
+  镜头钉在导轨上（世界不动、小车动），视野取满整条导轨（`1.1 × x_limit`），所以
+  **导轨两端——也就是失败发生的地方——始终在画面里**；`--camera follow` 可切回"镜头跟小车、
+  刻度滑动"的旧观感（超长导轨上更好用）
+* 地面上的两条底纹：绿色是成功判据里的位置窗口 `|x| < 1.5 m`，红色是导轨之外的出界区
+* 顶部状态胶囊：`BALANCED` / `RECOVERING` / `OUT OF RAIL`
+* 底部两栏读数：`θ / x / u（含占限幅百分比）`、本局时长、本局回报、近 100 步 |θ| 滑动平均、
+  并行环境均值、成功率、帧数；再下面是用力条形图（打满限幅时变红）
 * 评估模式另有 `holding for XX.X s`（不限时，直到杆子真的倒下）
+
+### 4.1 窗口按钮（评估时）
+
+| 按钮 | 作用 | 说明 |
+|---|---|---|
+| **Next episode** | 立即结束本局，记为 `skipped by user`，开下一局 | 不想看完一局时用 |
+| **Replay episode** | 用**同一个种子**重放本局，不计入统计 | 对着同一个起始角反复看失败瞬间 |
+| **Speed 1x** | 循环切换 0.25× / 0.5× / 1× / 2× / 4× | 放慢看 0.2 秒的撞轨，或加速刷过平衡段 |
+| **Quit** | 关窗停止（等同点窗口关闭按钮） | |
+
+按钮只设置标志位，物理与统计仍在主循环线程里处理（Tk 回调不碰仿真），驱动循环每步轮询
+`viewer.take_skip()` / `viewer.take_replay()` / `viewer.speed`。"跳过"与"重放"互斥，
+且都是**边沿触发**：点一次只生效一次。
 
 无显示器时自动降级为每 1 秒写一张 PNG 到 `outputs/live/<run>.png`，再不行就静默关闭，
 绝不因为可视化而中断训练。
@@ -266,6 +281,11 @@ python scripts/evaluate.py --checkpoint <ckpt> --init-mode upright --max-seconds
 
 # 想看它在更难的开局下表现如何（比训练范围更难，会看到救回与失败）
 python scripts/evaluate.py --checkpoint <ckpt> --init-mode random --init-angle-limit 45 --terminate-angle 60
+
+# 双模型联动 + 固定视角（推荐用法，见 RESULTS.md 5.5.11）
+python scripts/policy_switch.py --checkpoint checkpoints\s2_full_best.ckpt `
+    --middle outputs\checkpoints\s8_scratch34b\best.ckpt --inner 72 --outer 135 `
+    --render --camera fixed --max-seconds 10 --episode-pause 1.0
 ```
 
 ---

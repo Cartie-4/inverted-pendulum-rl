@@ -111,6 +111,7 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
         device=args.device,
         render=args.render,
         render_fps=args.render_fps,
+        camera=args.camera,
         render_env=args.render_env,
     )
 
@@ -287,6 +288,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="max live-view refresh rate; the canvas redraw costs ~1-2 ms, so keep it modest",
     )
     loop.add_argument("--render-env", type=int, default=0, help="which parallel env the live view follows")
+    loop.add_argument(
+        "--camera",
+        choices=["fixed", "follow"],
+        default="fixed",
+        help="live-view camera: 'fixed' pins the view to the rail so the cart visibly moves "
+             "along it and the rail limits stay on screen; 'follow' keeps the cart centred.",
+    )
     loop.add_argument(
         "--init-from",
         type=Path,
