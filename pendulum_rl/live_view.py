@@ -181,8 +181,23 @@ class LiveViewer:
         # Close box -> stop drawing instead of killing the training process.
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.update_idletasks()
+        # Freeze the layout: a window that is allowed to be resized re-runs the
+        # geometry manager whenever any label's requested size changes, and the
+        # numbers on screen change every frame.  Pinning min == max makes the
+        # window size a constant of the program rather than a function of the
+        # last frame's text.
+        self._lock_geometry()
         self.root.update()
         self.mode = "window"
+
+    def _lock_geometry(self) -> None:
+        try:
+            w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+            self.root.minsize(w, h)
+            self.root.maxsize(w, h)
+            self.root.geometry("%dx%d" % (w, h))
+        except Exception:  # noqa: BLE001 - cosmetic only, never worth failing a run
+            pass
 
     def _build_controls(self, tk) -> None:
         if not self.controls_enabled:
@@ -202,14 +217,23 @@ class LiveViewer:
                 relief="flat", bg="#e8edf2", activebackground="#d7e0e8", fg=TEXT,
                 padx=10, pady=3, cursor="hand2", borderwidth=0,
             )
+            if key == "speed":
+                # "Speed 0.25x" is wide, "Speed 4x" is narrow: without a pinned
+                # width the button (and the row it sits in) resizes on every
+                # click, and every other button shifts with it.
+                button.configure(width=12)
             button.pack(side="left", padx=(0, 6))
             try:
                 self._tooltip(button, tip)
             except Exception:  # noqa: BLE001 - a tooltip is never worth failing over
                 pass
             self.buttons[key] = button
-        # the live counter the loops update through note_episode()
-        self._progress = tk.Label(bar, text="episode —", font=self._font_body, bg=BG, fg=MUTED)
+        # The live counter the loops update through note_episode().  Its width is
+        # pinned: a label that grows with its text makes Tk re-run the pack
+        # geometry every time the text changes, which resizes the whole window
+        # and shows up as a flicker.
+        self._progress = tk.Label(bar, text="episode —", font=self._font_body, bg=BG, fg=MUTED,
+                                  anchor="e", width=12)
         self._progress.pack(side="right")
 
     def _tooltip(self, widget, text: str) -> None:
@@ -236,9 +260,14 @@ class LiveViewer:
     def _build_status(self, tk) -> None:
         panel = tk.Frame(self.root, bg=BG)
         panel.pack(fill="x", padx=10, pady=(0, 10))
-        self._left = tk.Label(panel, text="", font=self._font_mono, bg=BG, fg=TEXT, justify="left", anchor="w")
+        # Fixed-width, left/right anchored labels: every number on screen changes
+        # as the cart moves, and any label allowed to resize with its content
+        # drags the pack geometry (and the window) around with it.
+        self._left = tk.Label(panel, text="", font=self._font_mono, bg=BG, fg=TEXT,
+                              justify="left", anchor="w", width=64)
         self._left.pack(side="left")
-        self._right = tk.Label(panel, text="", font=self._font_mono, bg=BG, fg=TEXT, justify="right", anchor="e")
+        self._right = tk.Label(panel, text="", font=self._font_mono, bg=BG, fg=TEXT,
+                               justify="right", anchor="e", width=26)
         self._right.pack(side="right")
 
     def _init_snapshot_fallback(self) -> None:
@@ -481,15 +510,18 @@ class LiveViewer:
                            fill=CART if abs(frac) < 0.98 else BAD, outline="")
         c.create_text(12, bar_y - 15, anchor="w", text="force", fill=MUTED, font=self._font_body)
 
-        # --- text: the two panels carry the numbers, the canvas keeps the scene
+        # --- text: the two panels carry the numbers, the canvas keeps the scene.
+        #     Every field is formatted to a constant width: these labels are
+        #     fixed-width now, but stable columns also stop the digits from
+        #     jittering sideways as the values change.
         left = "theta %+7.2f deg    x %+6.3f m    u %+7.2f N (%+6.1f%% of limit)" % (
             deg, x, action, 100 * frac)
-        right = "t %5.2f s    episode return %+7.1f" % (step * cfg.control_dt, episode_return)
+        right = "t %5.2f s    return %+7.1f" % (step * cfg.control_dt, episode_return)
         batch_txt = ("%5.2f deg" % batch_mean_abs_theta_deg
-                     if batch_mean_abs_theta_deg == batch_mean_abs_theta_deg else "n/a")
-        left2 = "|theta| avg (last 100) %5.2f deg    all envs %s    reward %+6.3f" % (
+                     if batch_mean_abs_theta_deg == batch_mean_abs_theta_deg else "n/a     ")
+        left2 = "|theta| avg (100 steps) %5.2f deg    all envs %s    reward %+6.3f" % (
             mean_abs_theta_deg, batch_txt, reward)
-        right2 = "success %5.0f%%    frames %s" % (
+        right2 = "success %5.1f%%    frames %8s" % (
             100 * success_rate if success_rate == success_rate else float("nan"), f"{self.frames:,}")
         self._left.configure(text=left + "\n" + left2)
         self._right.configure(text=right + "\n" + right2)
